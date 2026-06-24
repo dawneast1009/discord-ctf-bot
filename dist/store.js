@@ -2,15 +2,17 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.addProblem = addProblem;
 exports.getProblem = getProblem;
+exports.removeProblem = removeProblem;
+exports.getGuildProblems = getGuildProblems;
 exports.markSolved = markSolved;
-exports.getTierChannel = getTierChannel;
-exports.setTierChannel = setTierChannel;
-exports.getAnnounceChannel = getAnnounceChannel;
-exports.setAnnounceChannel = setAnnounceChannel;
+exports.getForum = getForum;
+exports.setForum = setForum;
+exports.getVault = getVault;
+exports.setVault = setVault;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
-const empty = { problems: {}, tierChannels: {}, announceChannels: {} };
+const empty = { problems: {}, forums: {}, vaults: {} };
 function load() {
     if (!(0, node_fs_1.existsSync)(DB_PATH))
         return structuredClone(empty);
@@ -33,6 +35,15 @@ function addProblem(p) {
 function getProblem(id) {
     return db.problems[id];
 }
+function removeProblem(id) {
+    delete db.problems[id];
+    save();
+}
+function getGuildProblems(guildId) {
+    return Object.values(db.problems)
+        .filter((p) => p.guildId === guildId)
+        .sort((a, b) => b.createdAt - a.createdAt);
+}
 function markSolved(id, userId) {
     const p = db.problems[id];
     if (!p)
@@ -42,17 +53,17 @@ function markSolved(id, userId) {
         save();
     }
 }
-function getTierChannel(guildId, tier) {
-    return db.tierChannels[`${guildId}:${tier}`];
+function getForum(guildId) {
+    return db.forums[guildId];
 }
-function setTierChannel(guildId, tier, channelId) {
-    db.tierChannels[`${guildId}:${tier}`] = channelId;
+function setForum(guildId, channelId) {
+    db.forums[guildId] = channelId;
     save();
 }
-function getAnnounceChannel(guildId) {
-    return db.announceChannels[guildId];
+function getVault(guildId) {
+    return db.vaults[guildId];
 }
-function setAnnounceChannel(guildId, channelId) {
-    db.announceChannels[guildId] = channelId;
+function setVault(guildId, channelId) {
+    db.vaults[guildId] = channelId;
     save();
 }

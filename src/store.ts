@@ -8,16 +8,19 @@ export interface ProblemRecord {
   id: string;
   name: string;
   flag: string;
+  /** 표시용 전체 티어 라벨 (예: "브론즈1") */
   tier: string;
+  /** 기본 티어 (예: "브론즈") — 포럼 태그/점수 기준 */
+  tierBase: string;
+  /** 세부 레벨 (예: 1). 없으면 null */
+  tierLevel: number | null;
   guildId: string;
-  /** 티어 채널(숨김) ID */
-  tierChannelId: string;
-  /** 문제 비공개 스레드(포스트) ID */
-  threadId: string;
-  /** 알림 채널 ID */
-  announceChannelId: string;
-  /** 알림 메시지 ID */
-  announceMessageId: string;
+  /** 공개 포럼(게시판) 채널 ID */
+  forumId: string;
+  /** 공개 문제 게시글(포스트=스레드) ID */
+  postId: string;
+  /** 정답자만 입장하는 비공개 풀이방 스레드 ID */
+  vaultThreadId: string;
   authorId: string;
   /** 정답을 맞혀 입장 권한을 받은 사람들 */
   solvers: string[];
@@ -26,13 +29,13 @@ export interface ProblemRecord {
 
 interface DB {
   problems: Record<string, ProblemRecord>;
-  /** `${guildId}:${tier}` -> 티어 채널 ID */
-  tierChannels: Record<string, string>;
-  /** `${guildId}` -> 알림 채널 ID */
-  announceChannels: Record<string, string>;
+  /** `${guildId}` -> 포럼(게시판) 채널 ID */
+  forums: Record<string, string>;
+  /** `${guildId}` -> 비공개 풀이방을 담는 숨김 컨테이너 채널 ID */
+  vaults: Record<string, string>;
 }
 
-const empty: DB = { problems: {}, tierChannels: {}, announceChannels: {} };
+const empty: DB = { problems: {}, forums: {}, vaults: {} };
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -59,6 +62,17 @@ export function getProblem(id: string): ProblemRecord | undefined {
   return db.problems[id];
 }
 
+export function removeProblem(id: string) {
+  delete db.problems[id];
+  save();
+}
+
+export function getGuildProblems(guildId: string): ProblemRecord[] {
+  return Object.values(db.problems)
+    .filter((p) => p.guildId === guildId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
 export function markSolved(id: string, userId: string) {
   const p = db.problems[id];
   if (!p) return;
@@ -68,20 +82,20 @@ export function markSolved(id: string, userId: string) {
   }
 }
 
-export function getTierChannel(guildId: string, tier: string): string | undefined {
-  return db.tierChannels[`${guildId}:${tier}`];
+export function getForum(guildId: string): string | undefined {
+  return db.forums[guildId];
 }
 
-export function setTierChannel(guildId: string, tier: string, channelId: string) {
-  db.tierChannels[`${guildId}:${tier}`] = channelId;
+export function setForum(guildId: string, channelId: string) {
+  db.forums[guildId] = channelId;
   save();
 }
 
-export function getAnnounceChannel(guildId: string): string | undefined {
-  return db.announceChannels[guildId];
+export function getVault(guildId: string): string | undefined {
+  return db.vaults[guildId];
 }
 
-export function setAnnounceChannel(guildId: string, channelId: string) {
-  db.announceChannels[guildId] = channelId;
+export function setVault(guildId: string, channelId: string) {
+  db.vaults[guildId] = channelId;
   save();
 }
