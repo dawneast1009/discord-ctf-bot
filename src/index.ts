@@ -39,6 +39,7 @@ import {
   markCtfSolved,
   markSolved,
   removeCtfProblem,
+  removeForumFor,
   removeProblem,
   setForumFor,
   setVault,
@@ -102,7 +103,8 @@ const commands = [
     .addSubcommand((s) => s.setName("추가").setDescription("CTF 문제를 수동으로 추가"))
     .addSubcommand((s) => s.setName("solve").setDescription("이 문제 스레드에서 '풀었음'을 기록"))
     .addSubcommand((s) => s.setName("수정").setDescription("CTF 문제 이름/장르 수정 (출제자/관리자)"))
-    .addSubcommand((s) => s.setName("삭제").setDescription("CTF 문제 삭제 (출제자/관리자)"))
+    .addSubcommand((s) => s.setName("삭제").setDescription("CTF 문제 1개 삭제 (출제자/관리자)"))
+    .addSubcommand((s) => s.setName("대회삭제").setDescription("CTF 대회를 통째로 삭제 (관리자)"))
     .addSubcommand((s) =>
       s
         .setName("스코어보드")
@@ -115,14 +117,7 @@ const commands = [
         .setDescription("수동으로 솔브 추가 (관리자)")
         .addUserOption((o) => o.setName("user").setDescription("대상 유저").setRequired(true)),
     )
-    .addSubcommand((s) =>
-      s
-        .setName("pull")
-        .setDescription("CTFd 사이트에서 문제 가져오기 (관리자)")
-        .addStringOption((o) => o.setName("url").setDescription("CTFd 사이트 URL").setRequired(true))
-        .addStringOption((o) => o.setName("name").setDescription("이 CTF의 이름").setRequired(true))
-        .addStringOption((o) => o.setName("token").setDescription("CTFd API 토큰(선택)").setRequired(false)),
-    )
+    .addSubcommand((s) => s.setName("pull").setDescription("CTFd 사이트에 로그인해 문제 가져오기 (관리자)"))
     .toJSON(),
 ];
 
@@ -417,6 +412,27 @@ async function handleCtfCommand(interaction: ChatInputCommandInteraction) {
     });
   }
 
+  if (sub === "대회삭제") {
+    if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+    const problems = getGuildCtfProblems(guildId);
+    if (problems.length === 0) return interaction.reply({ content: "삭제할 CTF가 없습니다.", ephemeral: true });
+    const seen = new Map<string, { name: string; count: number }>();
+    for (const p of problems) {
+      const e = seen.get(p.ctfKey) ?? { name: p.ctfName, count: 0 };
+      e.count++;
+      seen.set(p.ctfKey, e);
+    }
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("ctfwipe_select")
+      .setPlaceholder("통째로 삭제할 CTF를 선택하세요")
+      .addOptions([...seen.entries()].slice(0, 25).map(([key, v]) => ({ label: `${v.name} (${v.count}문제)`.slice(0, 100), value: key })));
+    return interaction.reply({
+      content: "🧨 **대회 전체 삭제** — 선택한 CTF의 포럼과 모든 문제가 삭제됩니다. (되돌릴 수 없음)",
+      components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+      ephemeral: true,
+    });
+  }
+
   if (sub === "스코어보드") {
     const filter = interaction.options.getString("ctf") ?? undefined;
     return interaction.reply({ embeds: [buildCtfScoreboard(guildId, filter)] });
@@ -440,7 +456,21 @@ async function handleCtfCommand(interaction: ChatInputCommandInteraction) {
 
   if (sub === "pull") {
     if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
-    return ctfPull(interaction);
+    const modal = new ModalBuilder().setCustomId("ctfpull").setTitle("CTFd 로그인 & 문제 가져오기").addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("url").setLabel("사이트 URL (예: https://ctf.example.com)").setStyle(TextInputStyle.Short).setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("username").setLabel("아이디").setStyle(TextInputStyle.Short).setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder().setCustomId("password").setLabel("비밀번호 (이 창은 나만 보입니다)").setStyle(TextInputStyle.Short).setRequired(true),
+      ),
+    );
+    return interaction.showModal(modal);
   }
 }
 
@@ -495,6 +525,8 @@ async function handleButton(interaction: ButtonInteraction) {
 
 async function handleModal(interaction: ModalSubmitInteraction) {
   const id = interaction.customId;
+
+  if (id === "ctfpull") return handleCtfPullModal(interaction);
 
   // 드림핵 패널 입력
   if (id === "m_name" || id === "m_flag" || id === "m_tier" || id === "m_genre") {
@@ -613,6 +645,23 @@ async function handleSelect(interaction: StringSelectMenuInteraction) {
       ),
     );
     return interaction.showModal(modal);
+  }
+
+  if (cid === "ctfwipe_select") {
+    if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+    const key = interaction.values[0];
+    const guildId = interaction.guildId!;
+    const probs = getGuildCtfProblems(guildId).filter((p) => p.ctfKey === key);
+    if (probs.length === 0) return interaction.update({ content: "이미 삭제된 CTF입니다.", components: [] });
+    const ctfName = probs[0].ctfName;
+    await interaction.update({ content: `🧨 **${ctfName}** 삭제 중...`, components: [] });
+    const forumId = getForumFor(guildId, `ctf:${key}`);
+    if (forumId) {
+      await deleteChannelSafe(forumId);
+      removeForumFor(guildId, `ctf:${key}`);
+    }
+    for (const p of probs) removeCtfProblem(p.id);
+    return interaction.editReply({ content: `🧨 **${ctfName}** 대회(${probs.length}문제)를 통째로 삭제했습니다.` });
   }
 
   if (cid.startsWith("ctfadd:")) {
@@ -781,35 +830,73 @@ async function finalizeCtf(interaction: ButtonInteraction) {
   await interaction.editReply({ content: `✅ **${name}** (${ctfName} · ${genre}) 추가 완료!\n· 게시글: <#${rec.postId}>` });
 }
 
-// ── CTFd pull ─────────────────────────────────────────────────────────
-async function ctfPull(interaction: ChatInputCommandInteraction) {
-  const url = interaction.options.getString("url", true).trim().replace(/\/+$/, "");
-  const ctfName = interaction.options.getString("name", true).trim();
-  const token = interaction.options.getString("token") ?? undefined;
-  await interaction.deferReply();
+// ── CTFd 로그인 후 문제 목록 가져오기 ─────────────────────────────────
+async function ctfdLoginFetch(url: string, username: string, password: string): Promise<any[]> {
+  const jar = new Map<string, string>();
+  const applyCookies = (res: Response) => {
+    const sc: string[] = (res.headers as any).getSetCookie?.() ?? [];
+    for (const c of sc) {
+      const pair = c.split(";")[0];
+      const idx = pair.indexOf("=");
+      if (idx > 0) jar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1));
+    }
+  };
+  const cookie = () => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+
+  // 1) 로그인 페이지에서 CSRF nonce + 세션 쿠키 확보
+  let res = await fetch(`${url}/login`, { headers: { Cookie: cookie() }, redirect: "manual" });
+  applyCookies(res);
+  const html = await res.text();
+  const nonce =
+    html.match(/['"]csrfNonce['"]\s*:\s*["']([^"']+)["']/)?.[1] ??
+    html.match(/csrf_nonce\s*=\s*["']([^"']+)["']/)?.[1] ??
+    html.match(/name=["']nonce["']\s+value=["']([^"']+)["']/)?.[1];
+  if (!nonce) throw new Error("로그인 페이지를 해석하지 못했습니다. CTFd 사이트가 맞는지 URL을 확인하세요.");
+
+  // 2) 로그인 POST
+  const body = new URLSearchParams({ name: username, password, nonce, _submit: "Submit" }).toString();
+  res = await fetch(`${url}/login`, {
+    method: "POST",
+    headers: { Cookie: cookie(), "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+    redirect: "manual",
+  });
+  applyCookies(res);
+
+  // 3) 인증된 세션으로 문제 목록 요청
+  res = await fetch(`${url}/api/v1/challenges`, {
+    headers: { Cookie: cookie(), Accept: "application/json", "CSRF-Token": nonce },
+  });
+  const json: any = await res.json().catch(() => null);
+  if (!json?.success || !Array.isArray(json?.data)) {
+    throw new Error("로그인에 실패했거나 문제 목록을 볼 수 없습니다. 아이디/비밀번호를 확인하세요.");
+  }
+  return json.data;
+}
+
+async function handleCtfPullModal(interaction: ModalSubmitInteraction) {
+  if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+  if (!interaction.guild) return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
+  const url = interaction.fields.getTextInputValue("url").trim().replace(/\/+$/, "");
+  const ctfName = interaction.fields.getTextInputValue("ctfname").trim();
+  const username = interaction.fields.getTextInputValue("username").trim();
+  const password = interaction.fields.getTextInputValue("password");
+  await interaction.deferReply({ ephemeral: true });
 
   let list: any[];
   try {
-    const res = await fetch(`${url}/api/v1/challenges`, {
-      headers: { Accept: "application/json", ...(token ? { Authorization: `Token ${token}` } : {}) },
-    });
-    const json: any = await res.json();
-    list = json?.data;
-  } catch (e) {
-    return interaction.editReply("❌ 사이트에 접속하지 못했습니다. URL을 확인하거나 `/ctf 추가`로 수동 등록하세요.");
+    list = await ctfdLoginFetch(url, username, password);
+  } catch (e: any) {
+    return interaction.editReply(`❌ ${e?.message ?? "가져오기 실패"}\n→ \`/ctf 추가\`로 수동 등록할 수도 있어요.`);
   }
-  if (!Array.isArray(list) || list.length === 0) {
-    return interaction.editReply(
-      "❌ 문제를 불러오지 못했습니다. (CTFd 형식이 아니거나 로그인/토큰이 필요할 수 있어요.)\n→ `token` 옵션을 넣거나 `/ctf 추가`로 수동 등록하세요.",
-    );
-  }
+  if (list.length === 0) return interaction.editReply("⚠️ 로그인은 됐지만 공개된 문제가 없습니다.");
 
-  const guild = interaction.guild!;
+  const guild = interaction.guild;
   const ctfKey = keyOf(ctfName);
   const forum = await ensureForum(guild, `ctf:${ctfKey}`, `🚩-${ctfName}`);
   let created = 0;
   let skipped = 0;
-  for (const c of list.slice(0, 40)) {
+  for (const c of list.slice(0, 50)) {
     const name = String(c?.name ?? "").trim();
     if (!name) continue;
     const genre = String(c?.category ?? "misc").trim() || "misc";
@@ -820,7 +907,7 @@ async function ctfPull(interaction: ChatInputCommandInteraction) {
     await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id).catch(() => {});
     created++;
   }
-  await interaction.editReply(`✅ **${ctfName}** 가져오기 완료: ${created}개 생성, ${skipped}개 중복 건너뜀 (최대 40개).`);
+  await interaction.editReply(`✅ **${ctfName}** 로그인 가져오기 완료: ${created}개 생성, ${skipped}개 중복 (최대 50개).`);
 }
 
 // ── 헬스체크 서버 (PORT 있을 때만) ────────────────────────────────────

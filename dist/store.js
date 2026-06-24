@@ -16,6 +16,7 @@ exports.findCtfProblem = findCtfProblem;
 exports.markCtfSolved = markCtfSolved;
 exports.getForumFor = getForumFor;
 exports.setForumFor = setForumFor;
+exports.removeForumFor = removeForumFor;
 exports.getVault = getVault;
 exports.setVault = setVault;
 const node_fs_1 = require("node:fs");
@@ -111,6 +112,10 @@ function getForumFor(guildId, sourceKey) {
 }
 function setForumFor(guildId, sourceKey, channelId) {
     db.forums[`${guildId}:${sourceKey}`] = channelId;
+    save();
+}
+function removeForumFor(guildId, sourceKey) {
+    delete db.forums[`${guildId}:${sourceKey}`];
     save();
 }
 function getVault(guildId) {

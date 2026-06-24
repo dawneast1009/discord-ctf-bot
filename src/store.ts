@@ -155,6 +155,10 @@ export function setForumFor(guildId: string, sourceKey: string, channelId: strin
   db.forums[`${guildId}:${sourceKey}`] = channelId;
   save();
 }
+export function removeForumFor(guildId: string, sourceKey: string) {
+  delete db.forums[`${guildId}:${sourceKey}`];
+  save();
+}
 export function getVault(guildId: string): string | undefined {
   return db.vaults[guildId];
 }
