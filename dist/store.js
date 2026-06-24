@@ -13,12 +13,16 @@ exports.updateCtfProblem = updateCtfProblem;
 exports.getGuildCtfProblems = getGuildCtfProblems;
 exports.getCtfProblemByPost = getCtfProblemByPost;
 exports.findCtfProblem = findCtfProblem;
-exports.markCtfSolved = markCtfSolved;
+exports.recordCtfSolve = recordCtfSolve;
+exports.setCtfSolve = setCtfSolve;
 exports.getForumFor = getForumFor;
 exports.setForumFor = setForumFor;
 exports.removeForumFor = removeForumFor;
 exports.getVault = getVault;
 exports.setVault = setVault;
+exports.getCtfRole = getCtfRole;
+exports.setCtfRole = setCtfRole;
+exports.removeCtfRole = removeCtfRole;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
@@ -26,7 +30,7 @@ const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
 function keyOf(s) {
     return s.trim().toLowerCase();
 }
-const empty = { problems: {}, ctfProblems: {}, forums: {}, vaults: {} };
+const empty = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {} };
 function load() {
     if (!(0, node_fs_1.existsSync)(DB_PATH))
         return structuredClone(empty);
@@ -97,14 +101,28 @@ function getCtfProblemByPost(postId) {
 function findCtfProblem(guildId, ctfKey, nameKey) {
     return Object.values(db.ctfProblems).find((p) => p.guildId === guildId && p.ctfKey === ctfKey && p.nameKey === nameKey);
 }
-function markCtfSolved(id, userId) {
+/** 첫 솔브 기록 (푼 사람 1점, 도와준 사람 0.5점). 이미 풀렸으면 false */
+function recordCtfSolve(id, solverId, helperIds) {
     const p = db.ctfProblems[id];
-    if (p && !p.solvers.includes(userId)) {
-        p.solvers.push(userId);
-        save();
-        return true;
-    }
-    return false;
+    if (!p || p.solved)
+        return false;
+    p.solves[solverId] = 1;
+    for (const h of helperIds)
+        if (h !== solverId)
+            p.solves[h] = Math.max(p.solves[h] ?? 0, 0.5);
+    p.solved = true;
+    save();
+    return true;
+}
+/** 수동 보정: 특정 유저에게 점수 부여(잠김 무시) */
+function setCtfSolve(id, userId, amount) {
+    const p = db.ctfProblems[id];
+    if (!p)
+        return false;
+    p.solves[userId] = amount;
+    p.solved = true;
+    save();
+    return true;
 }
 // ── 포럼 / 풀이방 채널 ────────────────────────────────────────────────
 function getForumFor(guildId, sourceKey) {
@@ -123,5 +141,17 @@ function getVault(guildId) {
 }
 function setVault(guildId, channelId) {
     db.vaults[guildId] = channelId;
+    save();
+}
+// ── CTF 참가자 역할 ───────────────────────────────────────────────────
+function getCtfRole(guildId, ctfKey) {
+    return db.ctfRoles[`${guildId}:${ctfKey}`];
+}
+function setCtfRole(guildId, ctfKey, roleId) {
+    db.ctfRoles[`${guildId}:${ctfKey}`] = roleId;
+    save();
+}
+function removeCtfRole(guildId, ctfKey) {
+    delete db.ctfRoles[`${guildId}:${ctfKey}`];
     save();
 }

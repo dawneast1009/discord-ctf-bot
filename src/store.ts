@@ -47,8 +47,10 @@ export interface CtfProblem {
   /** 공개 포럼 게시글(=토론 스레드) ID */
   postId: string;
   authorId: string;
-  /** 푼 사람들 */
-  solvers: string[];
+  /** userId -> 솔브 점수 (푼 사람 1, 도와준 사람 0.5) */
+  solves: Record<string, number>;
+  /** 첫 솔브가 기록되면 잠김 (처음 푼 사람만 인정) */
+  solved: boolean;
   createdAt: number;
 }
 
@@ -59,9 +61,11 @@ interface DB {
   forums: Record<string, string>;
   /** `${guildId}` -> 비공개 풀이방을 담는 숨김 컨테이너 채널 ID */
   vaults: Record<string, string>;
+  /** `${guildId}:${ctfKey}` -> 참가자 역할 ID */
+  ctfRoles: Record<string, string>;
 }
 
-const empty: DB = { problems: {}, ctfProblems: {}, forums: {}, vaults: {} };
+const empty: DB = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {} };
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -137,14 +141,25 @@ export function findCtfProblem(guildId: string, ctfKey: string, nameKey: string)
     (p) => p.guildId === guildId && p.ctfKey === ctfKey && p.nameKey === nameKey,
   );
 }
-export function markCtfSolved(id: string, userId: string): boolean {
+/** 첫 솔브 기록 (푼 사람 1점, 도와준 사람 0.5점). 이미 풀렸으면 false */
+export function recordCtfSolve(id: string, solverId: string, helperIds: string[]): boolean {
   const p = db.ctfProblems[id];
-  if (p && !p.solvers.includes(userId)) {
-    p.solvers.push(userId);
-    save();
-    return true;
-  }
-  return false;
+  if (!p || p.solved) return false;
+  p.solves[solverId] = 1;
+  for (const h of helperIds) if (h !== solverId) p.solves[h] = Math.max(p.solves[h] ?? 0, 0.5);
+  p.solved = true;
+  save();
+  return true;
+}
+
+/** 수동 보정: 특정 유저에게 점수 부여(잠김 무시) */
+export function setCtfSolve(id: string, userId: string, amount: number): boolean {
+  const p = db.ctfProblems[id];
+  if (!p) return false;
+  p.solves[userId] = amount;
+  p.solved = true;
+  save();
+  return true;
 }
 
 // ── 포럼 / 풀이방 채널 ────────────────────────────────────────────────
@@ -164,5 +179,18 @@ export function getVault(guildId: string): string | undefined {
 }
 export function setVault(guildId: string, channelId: string) {
   db.vaults[guildId] = channelId;
+  save();
+}
+
+// ── CTF 참가자 역할 ───────────────────────────────────────────────────
+export function getCtfRole(guildId: string, ctfKey: string): string | undefined {
+  return db.ctfRoles[`${guildId}:${ctfKey}`];
+}
+export function setCtfRole(guildId: string, ctfKey: string, roleId: string) {
+  db.ctfRoles[`${guildId}:${ctfKey}`] = roleId;
+  save();
+}
+export function removeCtfRole(guildId: string, ctfKey: string) {
+  delete db.ctfRoles[`${guildId}:${ctfKey}`];
   save();
 }

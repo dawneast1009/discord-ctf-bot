@@ -26,6 +26,8 @@ function parseTier(input) {
 }
 const drafts = new Map();
 const ctfDrafts = new Map();
+/** /ctf solve 진행 상태: userId -> { problemId, solver?, helpers? } */
+const ctfSolveDrafts = new Map();
 const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
 // ── 슬래시 명령어 정의 ────────────────────────────────────────────────
 const commands = [
@@ -51,7 +53,12 @@ const commands = [
         .addSubcommand((s) => s
         .setName("점수추가")
         .setDescription("수동으로 솔브 추가 (관리자)")
-        .addUserOption((o) => o.setName("user").setDescription("대상 유저").setRequired(true)))
+        .addUserOption((o) => o.setName("user").setDescription("대상 유저").setRequired(true))
+        .addStringOption((o) => o
+        .setName("기여")
+        .setDescription("기여도 (기본: 푼 사람)")
+        .setRequired(false)
+        .addChoices({ name: "푼 사람 (1솔브)", value: "1" }, { name: "도와준 사람 (0.5솔브)", value: "0.5" })))
         .addSubcommand((s) => s.setName("pull").setDescription("CTFd 사이트에 로그인해 문제 가져오기 (관리자)"))
         .toJSON(),
 ];
@@ -139,6 +146,61 @@ async function ensureVault(guild) {
     (0, store_1.setVault)(guild.id, ch.id);
     return ch;
 }
+async function ensurePublicText(guild, key, name, topic) {
+    const existingId = (0, store_1.getForumFor)(guild.id, key);
+    if (existingId) {
+        const ch = guild.channels.cache.get(existingId) ?? (await guild.channels.fetch(existingId).catch(() => null));
+        if (ch && ch.type === discord_js_1.ChannelType.GuildText)
+            return ch;
+    }
+    const ch = await guild.channels.create({
+        name,
+        type: discord_js_1.ChannelType.GuildText,
+        topic,
+        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [discord_js_1.PermissionFlagsBits.SendMessages] }],
+    });
+    (0, store_1.setForumFor)(guild.id, key, ch.id);
+    return ch;
+}
+const ensureLobby = (guild) => ensurePublicText(guild, "_ctflobby", "🚩-ctf-로비", "CTF 참가 버튼을 누르면 그 대회 문제가 보입니다.");
+const ensureSolveChannel = (guild) => ensurePublicText(guild, "_solvelog", "🏅-solve-기록", "푼 문제 기록이 올라옵니다.");
+/** CTF 참가자 역할 + 비공개 포럼 확보. 처음 만들면 로비에 참가 버튼 게시 */
+async function getOrCreateCtf(guild, ctfName) {
+    const ctfKey = (0, store_1.keyOf)(ctfName);
+    // 역할
+    let roleId = (0, store_1.getCtfRole)(guild.id, ctfKey);
+    let role = roleId ? guild.roles.cache.get(roleId) ?? (await guild.roles.fetch(roleId).catch(() => null)) : null;
+    if (!role) {
+        role = await guild.roles.create({ name: `CTF: ${ctfName}`.slice(0, 90), mentionable: false });
+        (0, store_1.setCtfRole)(guild.id, ctfKey, role.id);
+    }
+    // 비공개 포럼 (참가자 역할만 보임)
+    let created = false;
+    const forumId = (0, store_1.getForumFor)(guild.id, `ctf:${ctfKey}`);
+    let forum = forumId ? guild.channels.cache.get(forumId) ?? (await guild.channels.fetch(forumId).catch(() => null)) : null;
+    if (!forum || forum.type !== discord_js_1.ChannelType.GuildForum) {
+        forum = await guild.channels.create({
+            name: `🚩-${ctfName}`.slice(0, 95),
+            type: discord_js_1.ChannelType.GuildForum,
+            topic: `${ctfName} — 참가자만 볼 수 있는 문제 게시판`,
+            permissionOverwrites: [
+                { id: guild.roles.everyone.id, deny: [discord_js_1.PermissionFlagsBits.ViewChannel] },
+                { id: role.id, allow: [discord_js_1.PermissionFlagsBits.ViewChannel] },
+            ],
+        });
+        (0, store_1.setForumFor)(guild.id, `ctf:${ctfKey}`, forum.id);
+        created = true;
+    }
+    // 처음 만들면 로비에 참가 버튼 게시
+    if (created) {
+        const lobby = await ensureLobby(guild);
+        const row = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId(`ctfjoin:${ctfKey}`).setLabel("참가할래요").setEmoji("🙌").setStyle(discord_js_1.ButtonStyle.Success));
+        await lobby
+            .send({ content: `🚩 **${ctfName}** 대회가 열렸어요! 아래 버튼을 누르면 참가하고 문제가 보입니다.`, components: [row] })
+            .catch(() => { });
+    }
+    return { forum: forum, roleId: role.id, ctfKey };
+}
 async function ensureTags(forum, names) {
     let tags = forum.availableTags;
     const missing = names.filter((n) => !tags.some((t) => t.name === n));
@@ -205,7 +267,8 @@ async function createCtfPost(guild, forum, ctfName, ctfKey, name, genre, authorI
         forumId: forum.id,
         postId: post.id,
         authorId,
-        solvers: [],
+        solves: {},
+        solved: false,
         createdAt: Date.now(),
     };
     (0, store_1.addCtfProblem)(rec);
@@ -222,6 +285,8 @@ client.on(discord_js_1.Events.InteractionCreate, async (interaction) => {
             return void (await handleModal(interaction));
         if (interaction.isStringSelectMenu())
             return void (await handleSelect(interaction));
+        if (interaction.isUserSelectMenu())
+            return void (await handleUserSelect(interaction));
     }
     catch (err) {
         console.error("인터랙션 처리 오류:", err);
@@ -272,10 +337,17 @@ async function handleCtfCommand(interaction) {
         const p = (0, store_1.getCtfProblemByPost)(interaction.channelId);
         if (!p)
             return interaction.reply({ content: "이 명령은 **CTF 문제 게시글(스레드) 안**에서 사용하세요.", ephemeral: true });
-        const added = (0, store_1.markCtfSolved)(p.id, interaction.user.id);
-        if (!added)
-            return interaction.reply({ content: "이미 풀이로 기록돼 있어요.", ephemeral: true });
-        return interaction.reply({ content: `✅ <@${interaction.user.id}> 님이 **${p.name}** (${p.ctfName}) 풀이 완료! 🎉` });
+        if (p.solved)
+            return interaction.reply({ content: "이미 풀린 문제예요. (처음 푼 사람만 인정)", ephemeral: true });
+        ctfSolveDrafts.set(interaction.user.id, { problemId: p.id, solver: interaction.user.id });
+        const solverRow = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.UserSelectMenuBuilder().setCustomId("solve_solver").setPlaceholder("푼 사람 (기본: 나)").setMinValues(1).setMaxValues(1));
+        const helperRow = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.UserSelectMenuBuilder().setCustomId("solve_helpers").setPlaceholder("도와준 사람 (선택, 0.5솔브)").setMinValues(0).setMaxValues(10));
+        const btnRow = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId("solve_confirm").setLabel("기록").setEmoji("✅").setStyle(discord_js_1.ButtonStyle.Success), new discord_js_1.ButtonBuilder().setCustomId("solve_cancel").setLabel("취소").setStyle(discord_js_1.ButtonStyle.Danger));
+        return interaction.reply({
+            content: `🏅 **${p.name}** (${p.ctfName}) 풀이 기록 — 푼 사람(1솔브)과 도와준 사람(0.5솔브)을 고르고 **기록**을 누르세요.`,
+            components: [solverRow, helperRow, btnRow],
+            ephemeral: true,
+        });
     }
     if (sub === "수정") {
         const problems = (0, store_1.getGuildCtfProblems)(guildId);
@@ -335,15 +407,16 @@ async function handleCtfCommand(interaction) {
         if (!isAdmin(interaction))
             return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
         const target = interaction.options.getUser("user", true);
+        const amount = interaction.options.getString("기여") ?? "1";
         const problems = (0, store_1.getGuildCtfProblems)(guildId);
         if (problems.length === 0)
             return interaction.reply({ content: "CTF 문제가 없습니다.", ephemeral: true });
         const menu = new discord_js_1.StringSelectMenuBuilder()
-            .setCustomId(`ctfadd:${target.id}`)
-            .setPlaceholder(`${target.username} 에게 솔브를 추가할 문제`)
+            .setCustomId(`ctfadd:${amount}:${target.id}`)
+            .setPlaceholder(`${target.username} 에게 ${amount}솔브 추가할 문제`)
             .addOptions(problems.slice(0, 25).map((p) => ({ label: `[${p.ctfName}] ${p.name}`.slice(0, 100), value: p.id })));
         return interaction.reply({
-            content: `➕ <@${target.id}> 에게 솔브를 추가할 문제를 고르세요.`,
+            content: `➕ <@${target.id}> 에게 **${amount}솔브** 추가할 문제를 고르세요.`,
             components: [new discord_js_1.ActionRowBuilder().addComponents(menu)],
             ephemeral: true,
         });
@@ -410,6 +483,56 @@ async function handleButton(interaction) {
             ephemeral: true,
         });
     }
+    // CTF 대회 참가 (역할 부여)
+    if (id.startsWith("ctfjoin:")) {
+        const ctfKey = id.slice("ctfjoin:".length);
+        if (!interaction.guild)
+            return;
+        const roleId = (0, store_1.getCtfRole)(interaction.guild.id, ctfKey);
+        if (!roleId)
+            return interaction.reply({ content: "대회를 찾을 수 없습니다.", ephemeral: true });
+        const member = interaction.member;
+        await member?.roles.add(roleId).catch(() => { });
+        return interaction.reply({ content: "🙌 참가 완료! 이제 이 대회의 문제 게시판이 보입니다.", ephemeral: true });
+    }
+    // /ctf solve 기록/취소
+    if (id === "solve_cancel") {
+        ctfSolveDrafts.delete(interaction.user.id);
+        return interaction.update({ content: "❌ 풀이 기록을 취소했습니다.", components: [] });
+    }
+    if (id === "solve_confirm")
+        return confirmCtfSolve(interaction);
+}
+async function confirmCtfSolve(interaction) {
+    const d = ctfSolveDrafts.get(interaction.user.id);
+    if (!d)
+        return interaction.update({ content: "세션이 만료됐어요. `/ctf solve` 를 다시 실행하세요.", components: [] });
+    const p = (0, store_1.getCtfProblem)(d.problemId);
+    if (!p)
+        return interaction.update({ content: "이미 삭제된 문제입니다.", components: [] });
+    if (p.solved)
+        return interaction.update({ content: "이미 풀린 문제예요. (처음 푼 사람만 인정)", components: [] });
+    const solver = d.solver ?? interaction.user.id;
+    const helpers = (d.helpers ?? []).filter((h) => h !== solver);
+    (0, store_1.recordCtfSolve)(p.id, solver, helpers);
+    ctfSolveDrafts.delete(interaction.user.id);
+    const helpTxt = helpers.length ? `\n도움: ${helpers.map((h) => `<@${h}>`).join(", ")} (각 0.5솔브)` : "";
+    if (interaction.guild) {
+        const solveCh = await ensureSolveChannel(interaction.guild);
+        await solveCh.send(`🏅 <@${solver}> 님이 **${p.name}** (${p.ctfName}) 풀이! 🎉${helpTxt}`).catch(() => { });
+    }
+    return interaction.update({ content: `✅ 기록 완료! <@${solver}> 1솔브${helpers.length ? ` · 도움 ${helpers.length}명` : ""}`, components: [] });
+}
+async function handleUserSelect(interaction) {
+    const d = ctfSolveDrafts.get(interaction.user.id);
+    if (!d)
+        return interaction.deferUpdate();
+    if (interaction.customId === "solve_solver")
+        d.solver = interaction.values[0];
+    if (interaction.customId === "solve_helpers")
+        d.helpers = [...interaction.values];
+    ctfSolveDrafts.set(interaction.user.id, d);
+    return interaction.deferUpdate();
 }
 async function handleModal(interaction) {
     const id = interaction.customId;
@@ -555,22 +678,26 @@ async function handleSelect(interaction) {
             await deleteChannelSafe(forumId);
             (0, store_1.removeForumFor)(guildId, `ctf:${key}`);
         }
+        const roleId = (0, store_1.getCtfRole)(guildId, key);
+        if (roleId) {
+            await interaction.guild?.roles.delete(roleId).catch(() => { });
+            (0, store_1.removeCtfRole)(guildId, key);
+        }
         for (const p of probs)
             (0, store_1.removeCtfProblem)(p.id);
-        return interaction.editReply({ content: `🧨 **${ctfName}** 대회(${probs.length}문제)를 통째로 삭제했습니다.` });
+        return interaction.editReply({ content: `🧨 **${ctfName}** 대회(${probs.length}문제)와 역할을 통째로 삭제했습니다.` });
     }
     if (cid.startsWith("ctfadd:")) {
         if (!isAdmin(interaction))
             return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
-        const targetId = cid.slice("ctfadd:".length);
+        const [, amountStr, targetId] = cid.split(":");
+        const amount = Number(amountStr) || 1;
         const p = (0, store_1.getCtfProblem)(interaction.values[0]);
         if (!p)
             return interaction.update({ content: "이미 삭제된 문제입니다.", components: [] });
-        const added = (0, store_1.markCtfSolved)(p.id, targetId);
+        (0, store_1.setCtfSolve)(p.id, targetId, amount);
         return interaction.update({
-            content: added
-                ? `➕ <@${targetId}> 에게 **${p.name}** (${p.ctfName}) 솔브를 추가했습니다.`
-                : `<@${targetId}> 는 이미 **${p.name}** 를 푼 것으로 기록돼 있습니다.`,
+            content: `➕ <@${targetId}> 에게 **${p.name}** (${p.ctfName}) ${amount}솔브를 부여했습니다.`,
             components: [],
         });
     }
@@ -621,14 +748,14 @@ function buildCtfScoreboard(guildId, ctfFilter) {
         byCtf.set(p.ctfKey, g);
     }
     for (const { ctfName, probs } of byCtf.values()) {
-        const count = new Map();
+        const pts = new Map();
         for (const p of probs)
-            for (const uid of p.solvers)
-                count.set(uid, (count.get(uid) ?? 0) + 1);
-        const ranking = [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+            for (const [uid, v] of Object.entries(p.solves ?? {}))
+                pts.set(uid, (pts.get(uid) ?? 0) + v);
+        const ranking = [...pts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
         const medals = ["🥇", "🥈", "🥉"];
         const body = ranking.length
-            ? ranking.map(([uid, n], i) => `${medals[i] ?? `#${i + 1}`} <@${uid}> — ${n}/${probs.length}문제`).join("\n")
+            ? ranking.map(([uid, n], i) => `${medals[i] ?? `#${i + 1}`} <@${uid}> — ${n}솔브`).join("\n")
             : "_아직 푼 사람이 없습니다._";
         embed.addFields({ name: `📌 ${ctfName} (총 ${probs.length}문제)`, value: body.slice(0, 1024) });
     }
@@ -710,10 +837,12 @@ async function finalizeCtf(interaction) {
         return interaction.reply({ content: `이미 **${ctfName}** 에 같은 이름의 문제가 있습니다.`, ephemeral: true });
     }
     await interaction.update({ content: "⏳ CTF 문제를 추가하는 중...", embeds: [], components: [] });
-    const forum = await ensureForum(guild, `ctf:${ctfKey}`, `🚩-${ctfName}`);
+    const { forum } = await getOrCreateCtf(guild, ctfName);
     const rec = await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id);
     ctfDrafts.delete(interaction.user.id);
-    await interaction.editReply({ content: `✅ **${name}** (${ctfName} · ${genre}) 추가 완료!\n· 게시글: <#${rec.postId}>` });
+    await interaction.editReply({
+        content: `✅ **${name}** (${ctfName} · ${genre}) 추가 완료!\n· 게시글: <#${rec.postId}>\n참가하려면 🚩-ctf-로비 에서 **참가할래요** 를 누르세요.`,
+    });
 }
 // ── CTFd 로그인 후 문제 목록 가져오기 ─────────────────────────────────
 async function ctfdLoginFetch(url, username, password) {
@@ -776,8 +905,7 @@ async function handleCtfPullModal(interaction) {
     if (list.length === 0)
         return interaction.editReply("⚠️ 로그인은 됐지만 공개된 문제가 없습니다.");
     const guild = interaction.guild;
-    const ctfKey = (0, store_1.keyOf)(ctfName);
-    const forum = await ensureForum(guild, `ctf:${ctfKey}`, `🚩-${ctfName}`);
+    const { forum, ctfKey } = await getOrCreateCtf(guild, ctfName);
     let created = 0;
     let skipped = 0;
     for (const c of list.slice(0, 50)) {
