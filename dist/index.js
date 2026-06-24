@@ -13,18 +13,6 @@ const GUILD_IDS = (process.env.GUILD_IDS ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-/** 기본 티어별 기본 점수 (드림핵 느낌). 모르는 티어는 15점. */
-const TIER_POINTS = {
-    브론즈: 10,
-    실버: 20,
-    골드: 30,
-    플래티넘: 40,
-    플래: 40,
-    다이아: 50,
-    다이아몬드: 50,
-    마스터: 70,
-    그랜드마스터: 90,
-};
 function parseTier(input) {
     const trimmed = input.trim();
     const m = trimmed.match(/^(.+?)\s*(\d+)\s*$/); // 기본티어 + 끝의 숫자
@@ -34,10 +22,6 @@ function parseTier(input) {
         return { label: `${base}${level}`, base, level };
     }
     return { label: trimmed, base: trimmed, level: null };
-}
-function pointsFor(p) {
-    const base = TIER_POINTS[p.tierBase] ?? 15;
-    return base + (p.tierLevel ?? 0);
 }
 const drafts = new Map();
 const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
@@ -72,14 +56,15 @@ client.once(discord_js_1.Events.ClientReady, async (c) => {
 });
 // ── 생성 패널(임베드 + 버튼) 렌더링 ───────────────────────────────────
 function buildPanel(state) {
-    const ready = Boolean(state.name && state.flag && state.tier);
+    const ready = Boolean(state.name && state.flag && state.tier && state.genre);
     const embed = new discord_js_1.EmbedBuilder()
         .setTitle("🛠️ 문제 생성")
         .setColor(ready ? 0x57f287 : 0x5865f2)
         .setDescription("아래 버튼을 눌러 항목을 채운 뒤 **제출**하세요.")
-        .addFields({ name: "📝 문제 이름", value: state.name ?? "`(미설정)`" }, { name: "🏴 정답(플래그)", value: state.flag ? "`✅ 설정됨`" : "`(미설정)`" }, { name: "🏅 티어", value: state.tier ? `\`${state.tier}\`  (예: 브론즈1 → 태그 브론즈)` : "`(미설정)`" });
-    const row = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId("c_name").setLabel("문제 이름").setEmoji("📝").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_flag").setLabel("문제의 답").setEmoji("🏴").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_tier").setLabel("티어").setEmoji("🏅").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_submit").setLabel("제출").setEmoji("✅").setStyle(discord_js_1.ButtonStyle.Success).setDisabled(!ready), new discord_js_1.ButtonBuilder().setCustomId("c_cancel").setLabel("취소").setStyle(discord_js_1.ButtonStyle.Danger));
-    return { embeds: [embed], components: [row] };
+        .addFields({ name: "📝 문제 이름", value: state.name ?? "`(미설정)`" }, { name: "🏴 정답(플래그)", value: state.flag ? "`✅ 설정됨`" : "`(미설정)`" }, { name: "📂 장르(카테고리)", value: state.genre ? `\`${state.genre}\`` : "`(미설정)`  예: web, pwn, crypto" }, { name: "🏅 티어", value: state.tier ? `\`${state.tier}\`  (예: 브론즈1 → 태그 브론즈)` : "`(미설정)`" });
+    const row1 = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId("c_name").setLabel("문제 이름").setEmoji("📝").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_flag").setLabel("문제의 답").setEmoji("🏴").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_genre").setLabel("장르").setEmoji("📂").setStyle(discord_js_1.ButtonStyle.Primary), new discord_js_1.ButtonBuilder().setCustomId("c_tier").setLabel("티어").setEmoji("🏅").setStyle(discord_js_1.ButtonStyle.Primary));
+    const row2 = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId("c_submit").setLabel("제출").setEmoji("✅").setStyle(discord_js_1.ButtonStyle.Success).setDisabled(!ready), new discord_js_1.ButtonBuilder().setCustomId("c_cancel").setLabel("취소").setStyle(discord_js_1.ButtonStyle.Danger));
+    return { embeds: [embed], components: [row1, row2] };
 }
 // ── 포럼(공개 게시판) 채널 확보 ───────────────────────────────────────
 async function ensureForum(guild) {
@@ -114,18 +99,21 @@ async function ensureVault(guild) {
     (0, store_1.setVault)(guild.id, ch.id);
     return ch;
 }
-// ── 티어 태그 확보 (기본 티어 단위) ───────────────────────────────────
-async function ensureTierTag(forum, base) {
-    const found = forum.availableTags.find((t) => t.name === base);
-    if (found)
-        return found.id;
-    if (forum.availableTags.length >= 20)
-        return undefined; // 포럼 태그 한도
-    const updated = await forum.setAvailableTags([
-        ...forum.availableTags.map((t) => ({ id: t.id, name: t.name, moderated: t.moderated, emoji: t.emoji })),
-        { name: base },
-    ]);
-    return updated.availableTags.find((t) => t.name === base)?.id;
+// ── 포럼 태그 확보 (여러 개를 한 번에 추가) — 반환: 이름 순서대로 태그 ID ──
+async function ensureTags(forum, names) {
+    let tags = forum.availableTags;
+    const missing = names.filter((n) => !tags.some((t) => t.name === n));
+    if (missing.length > 0 && tags.length < 20) {
+        const toAdd = missing.slice(0, 20 - tags.length).map((n) => ({ name: n }));
+        const updated = await forum.setAvailableTags([
+            ...tags.map((t) => ({ id: t.id, name: t.name, moderated: t.moderated, emoji: t.emoji })),
+            ...toAdd,
+        ]);
+        tags = updated.availableTags;
+    }
+    return names
+        .map((n) => tags.find((t) => t.name === n)?.id)
+        .filter((x) => Boolean(x));
 }
 // ── 모달 빌더 ─────────────────────────────────────────────────────────
 function textModal(customId, title, label) {
@@ -178,7 +166,7 @@ async function handleCommand(interaction) {
         const menu = new discord_js_1.StringSelectMenuBuilder()
             .setCustomId("del_select")
             .setPlaceholder("삭제할 문제를 선택하세요")
-            .addOptions(problems.slice(0, 25).map((p) => ({ label: `[${p.tier}] ${p.name}`.slice(0, 100), value: p.id })));
+            .addOptions(problems.slice(0, 25).map((p) => ({ label: `[${p.tier}] ${p.name} · ${p.genre}`.slice(0, 100), value: p.id })));
         return interaction.reply({
             content: "🗑️ 삭제할 문제를 고르세요. (출제자 또는 관리자만 삭제됩니다)",
             components: [new discord_js_1.ActionRowBuilder().addComponents(menu)],
@@ -197,6 +185,8 @@ async function handleButton(interaction) {
         return interaction.showModal(textModal("m_name", "문제 이름", "문제 이름을 입력하세요"));
     if (id === "c_flag")
         return interaction.showModal(textModal("m_flag", "정답(플래그)", "플래그를 입력하세요"));
+    if (id === "c_genre")
+        return interaction.showModal(textModal("m_genre", "장르(카테고리)", "예: web, pwn, crypto, reversing"));
     if (id === "c_tier")
         return interaction.showModal(textModal("m_tier", "티어", "예: 브론즈1, 실버3, 골드5"));
     if (id === "c_cancel") {
@@ -215,7 +205,7 @@ async function handleButton(interaction) {
 async function handleModal(interaction) {
     const id = interaction.customId;
     const value = interaction.fields.getTextInputValue("value").trim();
-    if (id === "m_name" || id === "m_flag" || id === "m_tier") {
+    if (id === "m_name" || id === "m_flag" || id === "m_tier" || id === "m_genre") {
         const state = drafts.get(interaction.user.id) ?? {};
         if (id === "m_name")
             state.name = value;
@@ -223,6 +213,8 @@ async function handleModal(interaction) {
             state.flag = value;
         if (id === "m_tier")
             state.tier = value;
+        if (id === "m_genre")
+            state.genre = value;
         drafts.set(interaction.user.id, state);
         if (interaction.isFromMessage())
             await interaction.update(buildPanel(state));
@@ -268,17 +260,15 @@ async function handleSelect(interaction) {
     (0, store_1.removeProblem)(problem.id);
     await interaction.editReply({ content: `🗑️ **[${problem.tier}] ${problem.name}** 문제를 삭제했습니다.` });
 }
-// ── 스코어보드 임베드 ─────────────────────────────────────────────────
+// ── 스코어보드 임베드 (솔브 수 기준, 주력=장르) ───────────────────────
 function buildScoreboard(guildId) {
     const problems = (0, store_1.getGuildProblems)(guildId);
     const rows = new Map();
     for (const p of problems) {
-        const pts = pointsFor(p);
         for (const uid of p.solvers) {
-            const r = rows.get(uid) ?? { userId: uid, points: 0, names: [], tierCount: new Map() };
-            r.points += pts;
-            r.names.push(`[${p.tier}] ${p.name}`);
-            r.tierCount.set(p.tierBase, (r.tierCount.get(p.tierBase) ?? 0) + 1);
+            const r = rows.get(uid) ?? { userId: uid, names: [], genreCount: new Map() };
+            r.names.push(`[${p.tier}] ${p.name} · ${p.genre}`);
+            r.genreCount.set(p.genre, (r.genreCount.get(p.genre) ?? 0) + 1);
             rows.set(uid, r);
         }
     }
@@ -287,15 +277,15 @@ function buildScoreboard(guildId) {
         embed.setDescription("아직 정답자가 없습니다. 문제를 풀어 첫 솔브를 기록하세요!");
         return embed;
     }
-    const sorted = [...rows.values()].sort((a, b) => b.points - a.points || b.names.length - a.names.length);
+    const sorted = [...rows.values()].sort((a, b) => b.names.length - a.names.length);
     const medals = ["🥇", "🥈", "🥉"];
     sorted.slice(0, 15).forEach((r, i) => {
         const rank = medals[i] ?? `#${i + 1}`;
-        const best = [...r.tierCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
+        const best = [...r.genreCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
         const list = r.names.map((n) => `• ${n}`).join("\n");
         embed.addFields({
-            name: `${rank}  ·  ${r.points}점  ·  ${r.names.length}솔브`,
-            value: `<@${r.userId}>  (주력: ${best})\n${list}`.slice(0, 1024),
+            name: `${rank}  ·  ${r.names.length}솔브`,
+            value: `<@${r.userId}>  (주력 카테고리: ${best})\n${list}`.slice(0, 1024),
         });
     });
     embed.setFooter({ text: `총 ${problems.length}문제 · 정답자 ${rows.size}명` });
@@ -304,19 +294,20 @@ function buildScoreboard(guildId) {
 // ── 제출: 포럼 글 + 비공개 풀이방 생성 ────────────────────────────────
 async function finalize(interaction) {
     const state = drafts.get(interaction.user.id);
-    if (!state?.name || !state.flag || !state.tier) {
-        return interaction.reply({ content: "이름·정답·티어를 모두 입력해야 합니다.", ephemeral: true });
+    if (!state?.name || !state.flag || !state.tier || !state.genre) {
+        return interaction.reply({ content: "이름·정답·장르·티어를 모두 입력해야 합니다.", ephemeral: true });
     }
     if (!interaction.guild) {
         return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
     }
     await interaction.update({ content: "⏳ 문제를 생성하는 중...", embeds: [], components: [] });
     const guild = interaction.guild;
+    const genre = state.genre.trim();
     const { label, base, level } = parseTier(state.tier);
     const title = `[${label}] ${state.name}`;
     const forum = await ensureForum(guild);
     const vault = await ensureVault(guild);
-    const tagId = await ensureTierTag(forum, base);
+    const tagIds = await ensureTags(forum, [genre, base]); // 장르 + 티어 태그
     const problemId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     // 정답자 전용 비공개 풀이방 (숨김 채널 안의 비공개 스레드)
     const vaultThread = await vault.threads.create({
@@ -326,25 +317,25 @@ async function finalize(interaction) {
         reason: `문제 생성: ${state.name}`,
     });
     await vaultThread.members.add(interaction.user.id).catch(() => { });
-    await vaultThread.send(`🏴 **${title}**\n출제자: <@${interaction.user.id}>\n\n정답자만 입장할 수 있는 풀이방입니다. 자유롭게 풀이를 공유하세요!`);
+    await vaultThread.send(`🏴 **${title}**  ·  장르 ${genre}\n출제자: <@${interaction.user.id}>\n\n정답자만 입장할 수 있는 풀이방입니다. 자유롭게 풀이를 공유하세요!`);
     // 공개 포럼 게시글(포스트)
     const card = new discord_js_1.EmbedBuilder()
         .setTitle(`🚩 ${title}`)
         .setColor(0x5865f2)
-        .addFields({ name: "티어", value: label, inline: true }, { name: "출제자", value: `<@${interaction.user.id}>`, inline: true })
+        .addFields({ name: "장르", value: genre, inline: true }, { name: "티어", value: label, inline: true }, { name: "출제자", value: `<@${interaction.user.id}>`, inline: true })
         .setFooter({ text: "아래 '문제의 답' 버튼으로 플래그를 제출하면 풀이방에 입장합니다." });
     const row = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId(`flag:${problemId}`).setLabel("문제의 답").setEmoji("🏴").setStyle(discord_js_1.ButtonStyle.Success));
-    const appliedTags = tagId ? [tagId] : [];
     const post = await forum.threads.create({
         name: title,
         message: { embeds: [card], components: [row] },
-        appliedTags,
+        appliedTags: tagIds,
         reason: `문제 생성: ${state.name}`,
     });
     const record = {
         id: problemId,
         name: state.name,
         flag: state.flag,
+        genre,
         tier: label,
         tierBase: base,
         tierLevel: level,
@@ -353,13 +344,13 @@ async function finalize(interaction) {
         postId: post.id,
         vaultThreadId: vaultThread.id,
         authorId: interaction.user.id,
-        solvers: [],
+        solvers: [interaction.user.id], // 출제자도 1솔브로 기록
         createdAt: Date.now(),
     };
     (0, store_1.addProblem)(record);
     drafts.delete(interaction.user.id);
     await interaction.editReply({
-        content: `✅ **${title}** 문제를 생성했습니다!\n· 공개 게시글: <#${post.id}>\n· 비공개 풀이방: <#${vaultThread.id}>`,
+        content: `✅ **${title}** (${genre}) 문제를 생성했습니다! 출제자도 1솔브로 기록됩니다.\n· 공개 게시글: <#${post.id}>\n· 비공개 풀이방: <#${vaultThread.id}>`,
     });
 }
 // ── 헬스체크용 최소 HTTP 서버 (Koyeb/Render 처럼 "포트 열림"을 요구할 때만) ──

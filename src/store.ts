@@ -8,6 +8,8 @@ export interface ProblemRecord {
   id: string;
   name: string;
   flag: string;
+  /** 장르(카테고리). 예: web, pwn, crypto, reversing */
+  genre: string;
   /** 표시용 전체 티어 라벨 (예: "브론즈1") */
   tier: string;
   /** 기본 티어 (예: "브론즈") — 포럼 태그/점수 기준 */
