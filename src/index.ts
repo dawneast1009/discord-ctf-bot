@@ -945,11 +945,10 @@ function normalizedEventTitle(title: string): string {
 }
 
 function eventDedupeKey(item: EventItem): string {
+  // 제목만 정규화해 묶는다 — 같은 기사가 매체/요약만 달라 중복되는 것을 막는다.
   const title = normalizedEventTitle(item.title);
-  const summary = normalizedEventTitle(item.summary ?? "").slice(0, 120);
-  const contentKey = item.kind === "news" && summary ? `${title}:${summary}` : title;
   const day = item.kind === "news" ? "" : item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "";
-  return `${item.kind ?? "security"}:${contentKey}:${day}`;
+  return `${item.kind ?? "security"}:${title}:${day}`;
 }
 
 function isUsefulEventItem(title: string, summary: string): boolean {
@@ -990,11 +989,40 @@ function shouldPublishAutoEvent(item: EventItem): boolean {
   const now = Date.now();
   if (item.kind === "news") return item.publishedAt >= now - 30 * 86400000 && isSecurityNews(item.title, item.summary ?? "");
   if (looksLikeResultNews(item.title, item.summary ?? "")) return false;
-  const target = item.endsAt ?? item.startsAt;
-  if (!target) return false;
-  if (target < now - 3 * 86400000) return false;
+  // 이미 끝난 행사는 새로 올리지 않음 (원본 봇과 동일 — 진행 예정/진행 중만 게시)
+  if (item.endsAt && item.endsAt < now) return false;
+  // 종료 시각을 모르면 시작 시각 기준: 12시간 넘게 지난 건 제외
+  if (!item.endsAt) {
+    if (!item.startsAt) return false;
+    if (item.startsAt < now - 12 * 3600000) return false;
+  }
   if (!item.source.startsWith("검색API") && !item.source.startsWith("자동탐색")) return true;
   return isEventAnnouncement(item.title, item.summary ?? "");
+}
+
+/** 종류별(CTF→AI→…→뉴스) 라운드로빈으로 섞어, 뉴스가 CTF를 굶기지 않게 한다. (원본 봇 interleave) */
+const EVENT_KIND_ORDER = ["ctf", "ai", "conference", "hackathon", "security", "news"];
+function interleaveEvents(events: EventItem[]): EventItem[] {
+  const dateKey = (e: EventItem) => e.startsAt ?? e.endsAt ?? e.publishedAt ?? Number.MAX_SAFE_INTEGER;
+  const queues: EventItem[][] = EVENT_KIND_ORDER.map((kind) =>
+    events.filter((e) => (e.kind ?? "security") === kind).sort((a, b) => dateKey(a) - dateKey(b)),
+  );
+  const other = events.filter((e) => !EVENT_KIND_ORDER.includes(e.kind ?? "security")).sort((a, b) => dateKey(a) - dateKey(b));
+  queues.push(other);
+  const ordered: EventItem[] = [];
+  let i = 0;
+  let drained = false;
+  while (!drained) {
+    drained = true;
+    for (const q of queues) {
+      if (i < q.length) {
+        ordered.push(q[i]);
+        drained = false;
+      }
+    }
+    i++;
+  }
+  return ordered;
 }
 
 function looksMostlyEnglish(input: string): boolean {
@@ -1522,9 +1550,20 @@ async function syncEvents(guild: Guild): Promise<{ fetched: number; posted: numb
     if (!existing || nextPriority < existingPriority) unique.set(dedupeKey, next);
   }
 
+  // 뉴스는 너무 많아지지 않게 최신 일부만 (행사/대회가 뉴스에 묻히지 않도록)
+  const NEWS_LIMIT = Math.max(1, Number(process.env.NEWS_LIMIT ?? 12) || 12);
+  const all = [...unique.values()];
+  const news = all
+    .filter((e) => e.kind === "news")
+    .sort((a, b) => (b.startsAt ?? b.publishedAt) - (a.startsAt ?? a.publishedAt))
+    .slice(0, NEWS_LIMIT);
+  const nonNews = all.filter((e) => e.kind !== "news");
+  // 종류별 라운드로빈으로 섞어 한 종류(뉴스)가 독식하지 못하게 한다.
+  const ordered = interleaveEvents([...nonNews, ...news]).slice(0, 150);
+
   let posted = 0;
   const touchedForums = new Map<string, ForumChannel>();
-  for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 100)) {
+  for (const item of ordered) {
     const before = getGuildEventItems(guild.id).length;
     if (await publishEventItem(guild, item).catch(() => false)) {
       const saved = getGuildEventItems(guild.id)[0];
