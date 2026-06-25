@@ -930,6 +930,7 @@ function shouldPublishAutoEvent(item: EventItem): boolean {
   const target = item.endsAt ?? item.startsAt;
   if (!target) return false;
   if (target < now - 3 * 86400000) return false;
+  if (!item.source.startsWith("검색API") && !item.source.startsWith("자동탐색")) return true;
   return isEventAnnouncement(item.title, item.summary ?? "");
 }
 
@@ -1367,7 +1368,7 @@ async function syncEvents(guild: Guild): Promise<{ fetched: number; posted: numb
 
   let posted = 0;
   const touchedForums = new Map<string, ForumChannel>();
-  for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 30)) {
+  for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 100)) {
     if (hasEventItem(guild.id, item.id)) continue;
     const forum = await ensureEventForum(guild, item);
     const forumKey = eventForumKey(item);

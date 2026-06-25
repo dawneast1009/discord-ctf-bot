@@ -767,6 +767,8 @@ function shouldPublishAutoEvent(item) {
         return false;
     if (target < now - 3 * 86400000)
         return false;
+    if (!item.source.startsWith("검색API") && !item.source.startsWith("자동탐색"))
+        return true;
     return isEventAnnouncement(item.title, item.summary ?? "");
 }
 function looksMostlyEnglish(input) {
@@ -1203,7 +1205,7 @@ async function syncEvents(guild) {
     }
     let posted = 0;
     const touchedForums = new Map();
-    for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 30)) {
+    for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 100)) {
         if ((0, store_1.hasEventItem)(guild.id, item.id))
             continue;
         const forum = await ensureEventForum(guild, item);
