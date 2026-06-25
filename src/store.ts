@@ -66,6 +66,7 @@ export interface EventItem {
   startsAt?: number;
   endsAt?: number;
   bucket?: string;
+  manual?: boolean;
   postedAt?: number;
   messageId?: string;
 }
