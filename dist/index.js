@@ -618,11 +618,13 @@ async function handleLoggingCommand(interaction) {
     return interaction.reply({ content: `📌 현재 로그 채널: <#${saved}>`, ephemeral: true });
 }
 // ── 보안뉴스 / 행사 공지 기능 (ctf-discord-bot 포팅 시작점) ──────────
+// kind: "news" = 그 피드 항목은 무조건 뉴스로 취급 (CTF/행사 채널로 새지 않게).
+//       "event" = 행사 발굴용 — 진짜 행사 공지만 추리고 결과/소식성 기사는 버린다.
 const DEFAULT_EVENT_FEEDS = [
-    "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%EC%95%88%20OR%20%EC%B7%A8%EC%95%BD%EC%A0%90%20OR%20%EB%9E%9C%EC%84%AC%EC%9B%A8%EC%96%B4&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=CTF%20OR%20%ED%95%B4%ED%82%B9%EB%B0%A9%EC%96%B4%EB%8C%80%ED%9A%8C%20OR%20%EB%B3%B4%EC%95%88%20%ED%95%B4%EC%BB%A4%ED%86%A4%20OR%20%EB%B3%B4%EC%95%88%20%EC%BB%A8%ED%8D%BC%EB%9F%B0%EC%8A%A4&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%ED%98%B8%20%EA%B3%B5%EB%AA%A8%EC%A0%84%20OR%20%EC%82%AC%EC%9D%B4%EB%B2%84%EB%B3%B4%EC%95%88%20%EA%B5%90%EC%9C%A1%20OR%20%EB%B3%B4%EC%95%88%20%EC%BA%A0%ED%94%84&hl=ko&gl=KR&ceid=KR:ko",
-    "https://www.boannews.com/media/news_rss.xml?mkind=1",
+    { url: "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%EC%95%88%20OR%20%EC%B7%A8%EC%95%BD%EC%A0%90%20OR%20%EB%9E%9C%EC%84%AC%EC%9B%A8%EC%96%B4&hl=ko&gl=KR&ceid=KR:ko", kind: "news" },
+    { url: "https://news.google.com/rss/search?q=CTF%20OR%20%ED%95%B4%ED%82%B9%EB%B0%A9%EC%96%B4%EB%8C%80%ED%9A%8C%20OR%20%EB%B3%B4%EC%95%88%20%ED%95%B4%EC%BB%A4%ED%86%A4%20OR%20%EB%B3%B4%EC%95%88%20%EC%BB%A8%ED%8D%BC%EB%9F%B0%EC%8A%A4&hl=ko&gl=KR&ceid=KR:ko", kind: "event" },
+    { url: "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%ED%98%B8%20%EA%B3%B5%EB%AA%A8%EC%A0%84%20OR%20%EC%82%AC%EC%9D%B4%EB%B2%84%EB%B3%B4%EC%95%88%20%EA%B5%90%EC%9C%A1%20OR%20%EB%B3%B4%EC%95%88%20%EC%BA%A0%ED%94%84&hl=ko&gl=KR&ceid=KR:ko", kind: "event" },
+    { url: "https://www.boannews.com/media/news_rss.xml?mkind=1", kind: "news" },
 ];
 const DEFAULT_EVENT_PAGES = [
     { name: "K-CTF", url: "https://kctf.kr/" },
@@ -691,7 +693,8 @@ function eventFeedUrls() {
     const extra = (process.env.EVENT_FEED_URLS ?? "")
         .split(",")
         .map((s) => s.trim())
-        .filter(Boolean);
+        .filter(Boolean)
+        .map((url) => ({ url, kind: "event" }));
     return [...DEFAULT_EVENT_FEEDS, ...extra];
 }
 function eventPageSources() {
@@ -783,10 +786,9 @@ function normalizedEventTitle(title) {
         .toLowerCase();
 }
 function eventDedupeKey(item) {
-    // 제목만 정규화해 묶는다 — 같은 기사가 매체/요약만 달라 중복되는 것을 막는다.
-    const title = normalizedEventTitle(item.title);
-    const day = item.kind === "news" ? "" : item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "";
-    return `${item.kind ?? "security"}:${title}:${day}`;
+    // 제목만 정규화해 묶는다 — 같은 대회/기사가 소스·날짜·요약 차이로 중복되는 것을 막는다.
+    // (CTF 제목엔 보통 연도가 들어가 연례 대회끼리는 구분된다)
+    return `${item.kind ?? "security"}:${normalizedEventTitle(item.title)}`;
 }
 function isUsefulEventItem(title, summary) {
     const text = `${title} ${summary}`.toLowerCase();
@@ -801,6 +803,9 @@ function looksLikeResultNews(title, summary) {
 function classifyEvent(title, summary) {
     const titleOnly = title.toLowerCase();
     const text = `${title} ${summary}`.toLowerCase();
+    // 결과·소식성 기사("성료/우승/시상" 등)는 대회가 아니라 뉴스로 — 제목에 CTF가 있어도.
+    if (looksLikeResultNews(title, summary))
+        return "news";
     if (/ctf|capture the flag|ctftime|codegate|wacon/i.test(titleOnly))
         return "ctf";
     if (/해킹방어|사이버공격방어/i.test(titleOnly) && /대회|경진대회|예선|본선|참가|접수|모집|개최|안내/i.test(title))
@@ -913,21 +918,36 @@ function bucketForEvent(item) {
         return "within_2m";
     return "later";
 }
-async function fetchEventFeed(url) {
+async function fetchEventFeed(url, feedKind = "event") {
     const res = await fetch(url, { headers: { "User-Agent": "discord-ctf-bot/1.0" } });
     if (!res.ok)
         throw new Error(`RSS 응답 실패 ${res.status}`);
     const xml = await res.text();
     const source = tagValue(xml, "title") || new URL(url).hostname;
     const blocks = [...xml.matchAll(/<item\b[\s\S]*?<\/item>/gi)].map((m) => m[0]);
-    return blocks
-        .map((block) => {
+    const out = [];
+    for (const block of blocks) {
         const title = stripHtml(tagValue(block, "title"));
         const link = tagValue(block, "link");
         const summary = stripHtml(tagValue(block, "description"));
+        if (!title || !link || !isUsefulEventItem(title, summary))
+            continue;
         const pubDate = Date.parse(tagValue(block, "pubDate") || tagValue(block, "updated"));
+        const publishedAt = Number.isFinite(pubDate) ? pubDate : Date.now();
         const startsAt = extractDateMs(`${title} ${summary}`);
-        const kind = classifyEvent(title, summary);
+        // 뉴스 피드 항목은 무조건 뉴스로 — 제목에 CTF가 있어도 대회 채널로 새지 않게.
+        let kind;
+        if (feedKind === "news") {
+            kind = "news";
+        }
+        else {
+            // 행사 발굴 피드: 결과/소식성 기사는 대회로 보지 않고, 행사 공지 신호가 없으면 버린다.
+            if (looksLikeResultNews(title, summary))
+                continue;
+            kind = classifyEvent(title, summary);
+            if (kind === "news")
+                continue; // 행사 신호가 없으면 행사 채널에 올리지 않음
+        }
         const item = {
             id: eventId(link, title),
             guildId: "",
@@ -936,14 +956,14 @@ async function fetchEventFeed(url) {
             source: stripHtml(source).replace(/^"|"$/g, ""),
             kind,
             summary,
-            publishedAt: Number.isFinite(pubDate) ? pubDate : Date.now(),
+            publishedAt,
             startsAt,
-            bucket: bucketForEvent({ kind, title, startsAt, publishedAt: Number.isFinite(pubDate) ? pubDate : Date.now() }),
+            bucket: bucketForEvent({ kind, title, startsAt, publishedAt }),
         };
         enrichEventDetails(item, `${title}\n${summary}`);
-        return item;
-    })
-        .filter((item) => item.title && item.link && isUsefulEventItem(item.title, item.summary ?? ""));
+        out.push(item);
+    }
+    return out;
 }
 async function fetchCtftimeRange(start, finish, limit) {
     const res = await fetch(`https://ctftime.org/api/v1/events/?limit=${limit}&start=${start}&finish=${finish}`, {
@@ -1167,6 +1187,7 @@ async function ensureEventForumFor(guild, kind, bucket) {
             type: discord_js_1.ChannelType.GuildForum,
             parent: categoryId,
             topic: `${kindLabel} 최신 소식`,
+            defaultSortOrder: discord_js_1.SortOrderType.CreationDate,
         });
         (0, store_1.setForumFor)(guild.id, key, ch.id);
         return ch;
@@ -1177,6 +1198,7 @@ async function ensureEventForumFor(guild, kind, bucket) {
         type: discord_js_1.ChannelType.GuildForum,
         parent: categoryId,
         topic: `${kindLabel} · ${bucketLabel}`,
+        defaultSortOrder: discord_js_1.SortOrderType.CreationDate,
     });
     (0, store_1.setForumFor)(guild.id, key, ch.id);
     return ch;
@@ -1204,42 +1226,6 @@ async function ensureEventCategory(guild, kind) {
     (0, store_1.setForumFor)(guild.id, key, ch.id);
     return ch.id;
 }
-async function updateEventIndex(guild, forum, key) {
-    const items = (0, store_1.getGuildEventItems)(guild.id)
-        .filter((item) => eventForumKey(item) === key)
-        .sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt));
-    if (items.length === 0)
-        return;
-    const lines = items.slice(0, 50).map((item) => {
-        const day = item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "날짜 미정";
-        return `• ${day} [${item.title}](${item.link})`;
-    });
-    const embed = new discord_js_1.EmbedBuilder()
-        .setTitle("일정표")
-        .setColor(0x2b8a3e)
-        .setDescription(lines.join("\n").slice(0, 4000))
-        .setFooter({ text: "새 공지가 늦게 올라와도 이 일정표는 행사 날짜순으로 다시 정렬됩니다." });
-    const indexKey = `eventindex:${key}`;
-    const existingId = (0, store_1.getForumFor)(guild.id, indexKey);
-    if (existingId) {
-        const thread = await guild.channels.fetch(existingId).catch(() => null);
-        if (thread?.isThread()) {
-            if (thread.archived)
-                await thread.setArchived(false).catch(() => { });
-            const starter = await thread.fetchStarterMessage().catch(() => null);
-            if (starter) {
-                await starter.edit({ embeds: [embed] }).catch(() => { });
-                return;
-            }
-        }
-    }
-    const thread = await forum.threads.create({
-        name: "📌 일정표",
-        message: { embeds: [embed] },
-        reason: "보안뉴스/행사 날짜순 일정표 생성",
-    });
-    (0, store_1.setForumFor)(guild.id, indexKey, thread.id);
-}
 async function publishEventItem(guild, item) {
     const next = { ...item, guildId: guild.id };
     next.kind = next.kind ?? classifyEvent(next.title, next.summary ?? "");
@@ -1251,14 +1237,12 @@ async function publishEventItem(guild, item) {
     if ((0, store_1.getGuildEventItems)(guild.id).some((item) => eventDedupeKey(item) === dedupeKey))
         return false;
     const forum = await ensureEventForum(guild, next);
-    const forumKey = eventForumKey(next);
     const post = await forum.threads.create({
         name: eventPostTitle(next),
         message: { embeds: [eventEmbed(next)] },
         reason: `보안뉴스/행사 등록: ${next.title}`,
     });
     (0, store_1.addEventItem)({ ...next, postedAt: Date.now(), messageId: post.id });
-    await updateEventIndex(guild, forum, forumKey);
     return true;
 }
 function eventPostTitle(item) {
@@ -1345,9 +1329,9 @@ async function syncEvents(guild) {
     catch (e) {
         errors.push(`CTFtime: ${e?.message ?? "실패"}`);
     }
-    for (const url of eventFeedUrls()) {
+    for (const { url, kind } of eventFeedUrls()) {
         try {
-            items.push(...(await fetchEventFeed(url)));
+            items.push(...(await fetchEventFeed(url, kind)));
         }
         catch (e) {
             errors.push(`${new URL(url).hostname}: ${e?.message ?? "실패"}`);
@@ -1390,23 +1374,16 @@ async function syncEvents(guild) {
         .sort((a, b) => (b.startsAt ?? b.publishedAt) - (a.startsAt ?? a.publishedAt))
         .slice(0, NEWS_LIMIT);
     const nonNews = all.filter((e) => e.kind !== "news");
-    // 종류별 라운드로빈으로 섞어 한 종류(뉴스)가 독식하지 못하게 한다.
-    const ordered = interleaveEvents([...nonNews, ...news]).slice(0, 150);
+    // 종류별 라운드로빈으로 섞고 상한선까지만 (행사가 뉴스에 묻히지 않게).
+    const kept = interleaveEvents([...nonNews, ...news]).slice(0, 150);
+    // 포럼은 생성일순(CreationDate)으로 자동 정렬되므로, 날짜가 가까운 글이 위로 오도록
+    // 먼 날짜부터 만들어 가까운 날짜를 가장 마지막(=맨 위)에 둔다.
+    const ordered = kept.reverse();
     let posted = 0;
-    const touchedForums = new Map();
     for (const item of ordered) {
-        const before = (0, store_1.getGuildEventItems)(guild.id).length;
-        if (await publishEventItem(guild, item).catch(() => false)) {
-            const saved = (0, store_1.getGuildEventItems)(guild.id)[0];
-            if (saved && (0, store_1.getGuildEventItems)(guild.id).length > before) {
-                const forum = await ensureEventForum(guild, saved);
-                touchedForums.set(eventForumKey(saved), forum);
-            }
+        if (await publishEventItem(guild, item).catch(() => false))
             posted++;
-        }
     }
-    for (const [key, forum] of touchedForums)
-        await updateEventIndex(guild, forum, key);
     (0, store_1.setEventStatus)(guild.id, {
         lastSyncAt: Date.now(),
         lastOk: errors.length === 0,
