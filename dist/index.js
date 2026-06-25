@@ -60,6 +60,7 @@ const commands = [
         .setRequired(false)
         .addChoices({ name: "푼 사람 (1솔브)", value: "1" }, { name: "도와준 사람 (0.5솔브)", value: "0.5" })))
         .addSubcommand((s) => s.setName("pull").setDescription("CTFd 사이트에 로그인해 문제 가져오기 (관리자)"))
+        .addSubcommand((s) => s.setName("import").setDescription("문제 목록을 붙여넣어 한 번에 등록 (관리자)"))
         .toJSON(),
 ];
 client.once(discord_js_1.Events.ClientReady, async (c) => {
@@ -427,6 +428,18 @@ async function handleCtfCommand(interaction) {
         const modal = new discord_js_1.ModalBuilder().setCustomId("ctfpull").setTitle("CTFd 로그인 & 문제 가져오기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("url").setLabel("사이트 URL (예: https://ctf.example.com)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("username").setLabel("아이디").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("password").setLabel("비밀번호 (이 창은 나만 보입니다)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)));
         return interaction.showModal(modal);
     }
+    if (sub === "import") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const modal = new discord_js_1.ModalBuilder().setCustomId("ctfimport").setTitle("문제 목록 붙여넣기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder()
+            .setCustomId("list")
+            .setLabel("문제 목록 (사이트에서 복사해 붙여넣기)")
+            .setStyle(discord_js_1.TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(4000)
+            .setPlaceholder("[web][문제1] 설명\n[pwn][문제2] 설명\n... 한 줄에 하나씩")));
+        return interaction.showModal(modal);
+    }
 }
 async function handleButton(interaction) {
     const id = interaction.customId;
@@ -538,6 +551,8 @@ async function handleModal(interaction) {
     const id = interaction.customId;
     if (id === "ctfpull")
         return handleCtfPullModal(interaction);
+    if (id === "ctfimport")
+        return handleCtfImportModal(interaction);
     // 드림핵 패널 입력
     if (id === "m_name" || id === "m_flag" || id === "m_tier" || id === "m_genre") {
         const value = interaction.fields.getTextInputValue("value").trim();
@@ -843,6 +858,57 @@ async function finalizeCtf(interaction) {
     await interaction.editReply({
         content: `✅ **${name}** (${ctfName} · ${genre}) 추가 완료!\n· 게시글: <#${rec.postId}>\n참가하려면 🚩-ctf-로비 에서 **참가할래요** 를 누르세요.`,
     });
+}
+// ── 붙여넣기 일괄 등록 ────────────────────────────────────────────────
+/** 한 줄에서 `[장르]...` 패턴을 찾아 {name, genre} 추출 (없으면 null) */
+function parseImportLine(line) {
+    const trimmed = line.trim().replace(/\s+/g, " ");
+    if (!trimmed)
+        return null;
+    const m = trimmed.match(/^\[([^\]]+)\]/);
+    if (!m)
+        return null;
+    return { name: trimmed, genre: m[1].trim() };
+}
+async function handleCtfImportModal(interaction) {
+    if (!isAdmin(interaction))
+        return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+    if (!interaction.guild)
+        return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
+    const ctfName = interaction.fields.getTextInputValue("ctfname").trim();
+    const raw = interaction.fields.getTextInputValue("list");
+    const seen = new Set();
+    const items = [];
+    for (const line of raw.split(/\r?\n/)) {
+        const parsed = parseImportLine(line);
+        if (!parsed)
+            continue;
+        const key = (0, store_1.keyOf)(parsed.name);
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        items.push(parsed);
+    }
+    if (items.length === 0) {
+        return interaction.reply({
+            content: "인식된 문제가 없어요. 각 줄이 `[장르]문제명` 형태인지 확인하세요. (예: `[web][로그인우회] 설명`)",
+            ephemeral: true,
+        });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const guild = interaction.guild;
+    const { forum, ctfKey } = await getOrCreateCtf(guild, ctfName);
+    let created = 0;
+    let skipped = 0;
+    for (const { name, genre } of items.slice(0, 50)) {
+        if ((0, store_1.findCtfProblem)(guild.id, ctfKey, (0, store_1.keyOf)(name))) {
+            skipped++;
+            continue;
+        }
+        await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id).catch(() => { });
+        created++;
+    }
+    await interaction.editReply(`✅ **${ctfName}** 일괄 등록: ${created}개 생성, ${skipped}개 중복 (인식 ${items.length}개, 최대 50개).\n참가하려면 🚩-ctf-로비 에서 **참가할래요** 를 누르세요.`);
 }
 // ── CTFd 로그인 후 문제 목록 가져오기 ─────────────────────────────────
 async function ctfdLoginFetch(url, username, password) {
