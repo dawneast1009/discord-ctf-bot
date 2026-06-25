@@ -363,14 +363,20 @@ client.once(Events.ClientReady, async (c) => {
   for (const guild of c.guilds.cache.values()) {
     await registerGuild(guild);
     if (getFeatures(guild.id).includes("logging")) await cacheInvites(guild);
-    if (getFeatures(guild.id).includes("events")) ensureEventScheduler(guild);
+    if (getFeatures(guild.id).includes("events")) {
+      await ensureEventForums(guild);
+      ensureEventScheduler(guild);
+    }
   }
   console.log(`명령어 등록 완료: ${c.guilds.cache.size}개 서버`);
 });
 
 client.on(Events.GuildCreate, async (guild) => {
   await registerGuild(guild);
-  if (getFeatures(guild.id).includes("events")) ensureEventScheduler(guild);
+  if (getFeatures(guild.id).includes("events")) {
+    await ensureEventForums(guild);
+    ensureEventScheduler(guild);
+  }
 });
 
 // ── 패널 렌더링 ───────────────────────────────────────────────────────
@@ -804,11 +810,24 @@ const EVENT_BUCKET_LABELS: Record<string, string> = {
   unknown: "날짜-미정",
   latest: "최신-소식",
 };
+const EVENT_BUCKETS_BY_KIND: Record<string, string[]> = {
+  ctf: ["within_1m", "within_2m", "later", "final", "ended"],
+  ai: ["within_1m", "within_2m", "later", "final", "ended"],
+  conference: ["within_1m", "within_2m", "later", "ended"],
+  hackathon: ["within_1m", "within_2m", "later", "final", "ended"],
+  security: ["within_1m", "within_2m", "later", "ended"],
+  news: ["latest"],
+};
 
 function eventForumKey(item: EventItem): string {
   const kind = item.kind ?? "security";
   if (kind === "news") return "events:news:latest";
   return `events:${kind}:bucket:${item.bucket ?? "unknown"}`;
+}
+
+function eventForumKeyFor(kind: string, bucket: string): string {
+  if (kind === "news") return "events:news:latest";
+  return `events:${kind}:bucket:${bucket}`;
 }
 
 function eventFeedUrls(): string[] {
@@ -1170,9 +1189,14 @@ async function fetchNaverSearchEvents(): Promise<EventItem[]> {
 
 async function ensureEventForum(guild: Guild, item: EventItem): Promise<ForumChannel> {
   const kind = item.kind ?? "security";
+  const bucket = kind === "news" ? "latest" : item.bucket ?? "unknown";
+  return ensureEventForumFor(guild, kind, bucket);
+}
+
+async function ensureEventForumFor(guild: Guild, kind: string, bucket: string): Promise<ForumChannel> {
   const kindLabel = EVENT_KIND_LABELS[kind] ?? "보안 행사";
   const categoryId = await ensureEventCategory(guild, kind);
-  const key = eventForumKey(item);
+  const key = eventForumKeyFor(kind, bucket);
   const existingId = getForumFor(guild.id, key);
   if (existingId) {
     const ch = guild.channels.cache.get(existingId) ?? (await guild.channels.fetch(existingId).catch(() => null));
@@ -1190,7 +1214,6 @@ async function ensureEventForum(guild: Guild, item: EventItem): Promise<ForumCha
     return ch as ForumChannel;
   }
 
-  const bucket = item.bucket ?? "unknown";
   const bucketLabel = EVENT_BUCKET_LABELS[bucket] ?? bucket;
   const ch = await guild.channels.create({
     name: bucketLabel,
@@ -1200,6 +1223,13 @@ async function ensureEventForum(guild: Guild, item: EventItem): Promise<ForumCha
   });
   setForumFor(guild.id, key, ch.id);
   return ch as ForumChannel;
+}
+
+async function ensureEventForums(guild: Guild) {
+  for (const kind of Object.keys(EVENT_KIND_LABELS)) {
+    const buckets = EVENT_BUCKETS_BY_KIND[kind] ?? ["within_1m", "within_2m", "later", "ended"];
+    for (const bucket of buckets) await ensureEventForumFor(guild, kind, bucket);
+  }
 }
 
 async function ensureEventCategory(guild: Guild, kind: string): Promise<string> {
@@ -1395,6 +1425,7 @@ async function handleEventCommand(interaction: ChatInputCommandInteraction) {
     if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
     try {
+      await ensureEventForums(interaction.guild);
       const result = await syncEvents(interaction.guild);
       return interaction.editReply(`✅ 수집 완료: ${result.fetched}개 확인, 새 글 ${result.posted}개 게시`);
     } catch (e: any) {
@@ -1933,7 +1964,10 @@ async function handleSelect(interaction: StringSelectMenuInteraction) {
     setFeatures(interaction.guild.id, next);
     await registerGuild(interaction.guild);
     if (cid === "feat_add" && selected.includes("logging")) await cacheInvites(interaction.guild);
-    if (cid === "feat_add" && selected.includes("events")) ensureEventScheduler(interaction.guild);
+    if (cid === "feat_add" && selected.includes("events")) {
+      await ensureEventForums(interaction.guild);
+      ensureEventScheduler(interaction.guild);
+    }
 
     const changed = selected.map((key) => FEATURES[key]?.label ?? key).join(", ");
     const enabledLabels = next.map((key) => FEATURES[key]?.label ?? key);
