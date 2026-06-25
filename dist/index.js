@@ -637,9 +637,10 @@ function monthKey(ms) {
 }
 function eventForumKey(item) {
     const kind = item.kind ?? "security";
-    if (kind !== "news" && item.startsAt)
+    if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
         return `events:${kind}:month:${monthKey(item.startsAt)}`;
-    return `events:${kind}:bucket:${item.bucket ?? "unknown"}`;
+    }
+    return `events:${kind}:main`;
 }
 function eventFeedUrls() {
     const extra = (process.env.EVENT_FEED_URLS ?? "")
@@ -950,13 +951,11 @@ async function fetchNaverSearchEvents() {
 async function ensureEventForum(guild, item) {
     const kind = item.kind ?? "security";
     const kindLabel = EVENT_KIND_LABELS[kind] ?? "보안 행사";
-    if (kind !== "news" && item.startsAt) {
+    if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
         const month = monthKey(item.startsAt);
         return ensureForum(guild, eventForumKey(item), `${kindLabel}-${month}`);
     }
-    const bucket = item.bucket ?? "unknown";
-    const bucketLabel = EVENT_BUCKET_LABELS[bucket] ?? bucket;
-    return ensureForum(guild, eventForumKey(item), `${kindLabel}-${bucketLabel}`);
+    return ensureForum(guild, eventForumKey(item), kindLabel);
 }
 async function updateEventIndex(guild, forum, key) {
     const items = (0, store_1.getGuildEventItems)(guild.id)

@@ -792,8 +792,10 @@ function monthKey(ms: number): string {
 
 function eventForumKey(item: EventItem): string {
   const kind = item.kind ?? "security";
-  if (kind !== "news" && item.startsAt) return `events:${kind}:month:${monthKey(item.startsAt)}`;
-  return `events:${kind}:bucket:${item.bucket ?? "unknown"}`;
+  if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
+    return `events:${kind}:month:${monthKey(item.startsAt)}`;
+  }
+  return `events:${kind}:main`;
 }
 
 function eventFeedUrls(): string[] {
@@ -1108,13 +1110,11 @@ async function fetchNaverSearchEvents(): Promise<EventItem[]> {
 async function ensureEventForum(guild: Guild, item: EventItem): Promise<ForumChannel> {
   const kind = item.kind ?? "security";
   const kindLabel = EVENT_KIND_LABELS[kind] ?? "보안 행사";
-  if (kind !== "news" && item.startsAt) {
+  if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
     const month = monthKey(item.startsAt);
     return ensureForum(guild, eventForumKey(item), `${kindLabel}-${month}`);
   }
-  const bucket = item.bucket ?? "unknown";
-  const bucketLabel = EVENT_BUCKET_LABELS[bucket] ?? bucket;
-  return ensureForum(guild, eventForumKey(item), `${kindLabel}-${bucketLabel}`);
+  return ensureForum(guild, eventForumKey(item), kindLabel);
 }
 
 async function updateEventIndex(guild: Guild, forum: ForumChannel, key: string) {
