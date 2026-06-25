@@ -18,6 +18,7 @@ exports.setCtfSolve = setCtfSolve;
 exports.getForumFor = getForumFor;
 exports.setForumFor = setForumFor;
 exports.removeForumFor = removeForumFor;
+exports.getForumKeysFor = getForumKeysFor;
 exports.getVault = getVault;
 exports.setVault = setVault;
 exports.getCtfRole = getCtfRole;
@@ -33,6 +34,9 @@ exports.setLogChannel = setLogChannel;
 exports.getGuildEventItems = getGuildEventItems;
 exports.hasEventItem = hasEventItem;
 exports.addEventItem = addEventItem;
+exports.getEventItem = getEventItem;
+exports.removeEventItem = removeEventItem;
+exports.clearGuildEvents = clearGuildEvents;
 exports.getEventStatus = getEventStatus;
 exports.setEventStatus = setEventStatus;
 const node_fs_1 = require("node:fs");
@@ -159,6 +163,12 @@ function removeForumFor(guildId, sourceKey) {
     delete db.forums[`${guildId}:${sourceKey}`];
     save();
 }
+function getForumKeysFor(guildId, prefix) {
+    const keyPrefix = `${guildId}:${prefix}`;
+    return Object.keys(db.forums)
+        .filter((key) => key.startsWith(keyPrefix))
+        .map((key) => key.slice(guildId.length + 1));
+}
 function getVault(guildId) {
     return db.vaults[guildId];
 }
@@ -216,6 +226,21 @@ function hasEventItem(guildId, id) {
 }
 function addEventItem(item) {
     db.eventItems[`${item.guildId}:${item.id}`] = item;
+    save();
+}
+function getEventItem(guildId, id) {
+    return db.eventItems[`${guildId}:${id}`];
+}
+function removeEventItem(guildId, id) {
+    delete db.eventItems[`${guildId}:${id}`];
+    save();
+}
+function clearGuildEvents(guildId) {
+    for (const key of Object.keys(db.eventItems)) {
+        if (db.eventItems[key]?.guildId === guildId)
+            delete db.eventItems[key];
+    }
+    delete db.eventStatus[guildId];
     save();
 }
 function getEventStatus(guildId) {

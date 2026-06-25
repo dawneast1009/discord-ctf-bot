@@ -219,6 +219,12 @@ export function removeForumFor(guildId: string, sourceKey: string) {
   delete db.forums[`${guildId}:${sourceKey}`];
   save();
 }
+export function getForumKeysFor(guildId: string, prefix: string): string[] {
+  const keyPrefix = `${guildId}:${prefix}`;
+  return Object.keys(db.forums)
+    .filter((key) => key.startsWith(keyPrefix))
+    .map((key) => key.slice(guildId.length + 1));
+}
 export function getVault(guildId: string): string | undefined {
   return db.vaults[guildId];
 }
@@ -280,6 +286,20 @@ export function hasEventItem(guildId: string, id: string): boolean {
 }
 export function addEventItem(item: EventItem) {
   db.eventItems[`${item.guildId}:${item.id}`] = item;
+  save();
+}
+export function getEventItem(guildId: string, id: string): EventItem | undefined {
+  return db.eventItems[`${guildId}:${id}`];
+}
+export function removeEventItem(guildId: string, id: string) {
+  delete db.eventItems[`${guildId}:${id}`];
+  save();
+}
+export function clearGuildEvents(guildId: string) {
+  for (const key of Object.keys(db.eventItems)) {
+    if (db.eventItems[key]?.guildId === guildId) delete db.eventItems[key];
+  }
+  delete db.eventStatus[guildId];
   save();
 }
 export function getEventStatus(guildId: string): EventStatus {

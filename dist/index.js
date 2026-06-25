@@ -128,6 +128,34 @@ const eventFeatureCommands = [
         .setDescription("최근 수집한 보안뉴스/행사 목록을 봅니다")
         .addIntegerOption((o) => o.setName("count").setDescription("표시할 개수 (기본 10)").setRequired(false).setMinValue(1).setMaxValue(20))
         .toJSON(),
+    new discord_js_1.SlashCommandBuilder()
+        .setName("event_add")
+        .setDescription("보안뉴스/행사를 수동으로 추가합니다")
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .addStringOption((o) => o.setName("title").setDescription("제목").setRequired(true))
+        .addStringOption((o) => o.setName("url").setDescription("링크").setRequired(true))
+        .addStringOption((o) => o.setName("date").setDescription("행사 날짜. 예: 2026-07-10").setRequired(false))
+        .addStringOption((o) => o
+        .setName("kind")
+        .setDescription("분류")
+        .setRequired(false)
+        .addChoices({ name: "CTF 대회", value: "ctf" }, { name: "AI 경진대회", value: "ai" }, { name: "보안 컨퍼런스", value: "conference" }, { name: "보안 해커톤", value: "hackathon" }, { name: "정보보안 소식", value: "news" }))
+        .toJSON(),
+    new discord_js_1.SlashCommandBuilder()
+        .setName("event_remove")
+        .setDescription("수집/등록된 보안뉴스·행사를 삭제합니다")
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .toJSON(),
+    new discord_js_1.SlashCommandBuilder()
+        .setName("event_import")
+        .setDescription("보안뉴스/행사 목록을 붙여넣어 한 번에 등록합니다")
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .toJSON(),
+    new discord_js_1.SlashCommandBuilder()
+        .setName("event_reset")
+        .setDescription("보안뉴스/행사 수집 기록을 초기화합니다")
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .toJSON(),
 ];
 // 항상 등록되는 기능 관리 명령어
 const botCommand = new discord_js_1.SlashCommandBuilder()
@@ -144,7 +172,7 @@ const botCommand = new discord_js_1.SlashCommandBuilder()
 // 기능 레지스트리
 const FEATURES = {
     ctf: { label: "CTF · 드림핵 문제 관리", desc: "/문제, /ctf 명령어", commands: ctfFeatureCommands },
-    events: { label: "보안뉴스 · 행사 공지", desc: "/event_sync, /event_status, /event_upcoming", commands: eventFeatureCommands },
+    events: { label: "보안뉴스 · 행사 공지", desc: "/event_sync, /event_add, /event_import 등", commands: eventFeatureCommands },
     logging: { label: "입장/퇴장 로그", desc: "/로그채널 + 초대 추적·입퇴장 알림", commands: loggingFeatureCommands },
 };
 /** 각 명령어가 속한 기능 키 */
@@ -154,6 +182,10 @@ const COMMAND_FEATURE = {
     event_sync: "events",
     event_status: "events",
     event_upcoming: "events",
+    event_add: "events",
+    event_remove: "events",
+    event_import: "events",
+    event_reset: "events",
     로그채널: "logging",
     로그채널확인: "logging",
 };
@@ -399,6 +431,21 @@ async function deleteChannelSafe(id) {
     if (ch)
         await ch.delete().catch(() => { });
 }
+async function resetEventFeature(guild) {
+    const items = (0, store_1.getGuildEventItems)(guild.id);
+    const keys = [...(0, store_1.getForumKeysFor)(guild.id, "events:"), ...(0, store_1.getForumKeysFor)(guild.id, "eventindex:")];
+    let channels = 0;
+    for (const key of keys) {
+        const channelId = (0, store_1.getForumFor)(guild.id, key);
+        if (!channelId)
+            continue;
+        await deleteChannelSafe(channelId);
+        (0, store_1.removeForumFor)(guild.id, key);
+        channels++;
+    }
+    (0, store_1.clearGuildEvents)(guild.id);
+    return { channels, items: items.length };
+}
 // ── CTF 카드 임베드 / 버튼 ────────────────────────────────────────────
 function ctfCard(name, ctfName, genre, authorId) {
     return new discord_js_1.EmbedBuilder()
@@ -470,7 +517,7 @@ async function handleCommand(interaction) {
         return handleProblemCommand(interaction);
     if (name === "ctf")
         return handleCtfCommand(interaction);
-    if (name === "event_sync" || name === "event_status" || name === "event_upcoming")
+    if (name.startsWith("event_"))
         return handleEventCommand(interaction);
     if (name === "로그채널" || name === "로그채널확인")
         return handleLoggingCommand(interaction);
@@ -947,6 +994,24 @@ async function updateEventIndex(guild, forum, key) {
     });
     (0, store_1.setForumFor)(guild.id, indexKey, thread.id);
 }
+async function publishEventItem(guild, item) {
+    const next = { ...item, guildId: guild.id };
+    next.kind = next.kind ?? classifyEvent(next.title, next.summary ?? "");
+    next.startsAt = next.startsAt ?? (next.kind === "news" ? next.publishedAt : extractDateMs(`${next.title} ${next.summary ?? ""}`));
+    next.bucket = bucketForEvent(next);
+    if ((0, store_1.hasEventItem)(guild.id, next.id))
+        return false;
+    const forum = await ensureEventForum(guild, next);
+    const forumKey = eventForumKey(next);
+    const post = await forum.threads.create({
+        name: `${next.startsAt ? new Date(next.startsAt).toISOString().slice(0, 10) : "날짜 미정"} ${next.title}`.slice(0, 95),
+        message: { embeds: [eventEmbed(next)] },
+        reason: `보안뉴스/행사 등록: ${next.title}`,
+    });
+    (0, store_1.addEventItem)({ ...next, postedAt: Date.now(), messageId: post.id });
+    await updateEventIndex(guild, forum, forumKey);
+    return true;
+}
 function eventEmbed(item) {
     const when = item.startsAt
         ? item.endsAt
@@ -1034,6 +1099,32 @@ async function syncEvents(guild) {
     });
     return { fetched: unique.size, posted };
 }
+function parseManualEventLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed)
+        return null;
+    const parts = trimmed.split("|").map((p) => p.trim());
+    const [datePart, titlePart, urlPart, kindPart] = parts.length >= 3 ? parts : ["", parts[0], parts[1], parts[2]];
+    const title = titlePart?.trim();
+    const link = urlPart?.trim();
+    if (!title || !link)
+        return null;
+    const startsAt = extractDateMs(datePart || title);
+    const kind = kindPart || classifyEvent(title, "");
+    const item = {
+        id: eventId(link, `manual:${title}`),
+        guildId: "",
+        title,
+        link,
+        source: "Manual",
+        kind,
+        summary: datePart ? `수동 등록 날짜: ${datePart}` : "",
+        publishedAt: startsAt ?? Date.now(),
+        startsAt,
+    };
+    item.bucket = bucketForEvent(item);
+    return item;
+}
 async function handleEventCommand(interaction) {
     if (!interaction.guild)
         return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
@@ -1055,6 +1146,71 @@ async function handleEventCommand(interaction) {
             });
             return interaction.editReply(`❌ 수집 실패: ${e?.message ?? "알 수 없는 오류"}`);
         }
+    }
+    if (interaction.commandName === "event_add") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const title = interaction.options.getString("title", true).trim();
+        const link = interaction.options.getString("url", true).trim();
+        const date = interaction.options.getString("date")?.trim() ?? "";
+        const startsAt = date ? extractDateMs(date) : undefined;
+        const kind = interaction.options.getString("kind") ?? classifyEvent(title, "");
+        const item = {
+            id: eventId(link, `manual:${title}`),
+            guildId: interaction.guild.id,
+            title,
+            link,
+            source: "Manual",
+            kind,
+            summary: date ? `수동 등록 날짜: ${date}` : "",
+            publishedAt: startsAt ?? Date.now(),
+            startsAt,
+        };
+        item.bucket = bucketForEvent(item);
+        const posted = await publishEventItem(interaction.guild, item);
+        return interaction.reply({ content: posted ? "✅ 보안뉴스/행사를 등록했습니다." : "이미 등록된 항목입니다.", ephemeral: true });
+    }
+    if (interaction.commandName === "event_import") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const modal = new discord_js_1.ModalBuilder().setCustomId("eventimport").setTitle("보안뉴스/행사 목록 가져오기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder()
+            .setCustomId("list")
+            .setLabel("한 줄에 하나: 날짜 | 제목 | URL | 분류")
+            .setStyle(discord_js_1.TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(4000)
+            .setPlaceholder("2026-07-10 | Example CTF | https://example.com | ctf")));
+        return interaction.showModal(modal);
+    }
+    if (interaction.commandName === "event_remove") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const items = (0, store_1.getGuildEventItems)(interaction.guild.id).slice(0, 25);
+        if (items.length === 0)
+            return interaction.reply({ content: "삭제할 항목이 없습니다.", ephemeral: true });
+        const menu = new discord_js_1.StringSelectMenuBuilder()
+            .setCustomId("eventremove_select")
+            .setPlaceholder("삭제할 항목을 고르세요")
+            .addOptions(items.map((item) => ({
+            label: `${item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "날짜 미정"} ${item.title}`.slice(0, 100),
+            value: item.id,
+            description: (item.source ?? "").slice(0, 100),
+        })));
+        return interaction.reply({
+            content: "삭제할 보안뉴스/행사를 선택하세요.",
+            components: [new discord_js_1.ActionRowBuilder().addComponents(menu)],
+            ephemeral: true,
+        });
+    }
+    if (interaction.commandName === "event_reset") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const row = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId("eventreset_confirm").setLabel("삭제").setStyle(discord_js_1.ButtonStyle.Danger), new discord_js_1.ButtonBuilder().setCustomId("eventreset_cancel").setLabel("취소").setStyle(discord_js_1.ButtonStyle.Secondary));
+        return interaction.reply({
+            content: "🧨 보안뉴스/행사 기능이 만든 포럼·일정표 스레드와 수집 기록을 삭제할까요? 되돌릴 수 없습니다.",
+            components: [row],
+            ephemeral: true,
+        });
     }
     if (interaction.commandName === "event_status") {
         const status = (0, store_1.getEventStatus)(interaction.guild.id);
@@ -1230,6 +1386,18 @@ async function handleCtfCommand(interaction) {
 }
 async function handleButton(interaction) {
     const id = interaction.customId;
+    if (id === "eventreset_cancel") {
+        return interaction.update({ content: "❌ 보안뉴스/행사 리셋을 취소했습니다.", components: [] });
+    }
+    if (id === "eventreset_confirm") {
+        if (!interaction.guild)
+            return interaction.update({ content: "서버 안에서만 사용할 수 있습니다.", components: [] });
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        await interaction.update({ content: "🧨 보안뉴스/행사 포럼과 기록을 삭제하는 중...", components: [] });
+        const result = await resetEventFeature(interaction.guild);
+        return interaction.editReply({ content: `🧨 리셋 완료: 채널/스레드 ${result.channels}개 삭제, 수집 기록 ${result.items}개 초기화` });
+    }
     // 드림핵 생성 패널
     if (id === "c_name")
         return interaction.showModal(textModal("m_name", "문제 이름", "문제 이름을 입력하세요"));
@@ -1340,6 +1508,25 @@ async function handleModal(interaction) {
         return handleCtfPullModal(interaction);
     if (id === "ctfimport")
         return handleCtfImportModal(interaction);
+    if (id === "eventimport") {
+        if (!interaction.guild)
+            return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        const lines = interaction.fields.getTextInputValue("list").split(/\r?\n/);
+        let parsed = 0;
+        let posted = 0;
+        for (const line of lines) {
+            const item = parseManualEventLine(line);
+            if (!item)
+                continue;
+            parsed++;
+            if (await publishEventItem(interaction.guild, item).catch(() => false))
+                posted++;
+        }
+        return interaction.editReply(`✅ 가져오기 완료: ${parsed}개 인식, 새 항목 ${posted}개 등록`);
+    }
     // 드림핵 패널 입력
     if (id === "m_name" || id === "m_flag" || id === "m_tier" || id === "m_genre") {
         const value = interaction.fields.getTextInputValue("value").trim();
@@ -1475,6 +1662,20 @@ async function handleSelect(interaction) {
         await deleteChannelSafe(problem.vaultThreadId);
         (0, store_1.removeProblem)(problem.id);
         return interaction.editReply({ content: `🗑️ **[${problem.tier}] ${problem.name}** 삭제 완료.` });
+    }
+    if (cid === "eventremove_select") {
+        if (!interaction.guildId)
+            return interaction.update({ content: "서버 안에서만 사용할 수 있습니다.", components: [] });
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const item = (0, store_1.getEventItem)(interaction.guildId, interaction.values[0]);
+        if (!item)
+            return interaction.update({ content: "이미 삭제된 항목입니다.", components: [] });
+        await interaction.update({ content: `🗑️ '${item.title}' 삭제 중...`, components: [] });
+        if (item.messageId)
+            await deleteChannelSafe(item.messageId);
+        (0, store_1.removeEventItem)(interaction.guildId, item.id);
+        return interaction.editReply({ content: `🗑️ **${item.title}** 삭제 완료. 일정표는 다음 수집/등록 때 다시 정리됩니다.` });
     }
     if (cid === "ctfdel_select") {
         const p = (0, store_1.getCtfProblem)(interaction.values[0]);
