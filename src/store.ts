@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-const DB_PATH = join(process.cwd(), "data.json");
+const DB_PATH = process.env.DATABASE_PATH?.trim() || join(process.cwd(), "data.json");
 
 /** 대소문자/공백 무시 비교용 키 */
 export function keyOf(s: string): string {
@@ -54,6 +54,30 @@ export interface CtfProblem {
   createdAt: number;
 }
 
+export interface EventItem {
+  id: string;
+  guildId: string;
+  title: string;
+  link: string;
+  source: string;
+  kind?: string;
+  summary?: string;
+  publishedAt: number;
+  startsAt?: number;
+  endsAt?: number;
+  bucket?: string;
+  postedAt?: number;
+  messageId?: string;
+}
+
+export interface EventStatus {
+  lastSyncAt?: number;
+  lastOk?: boolean;
+  lastMessage?: string;
+  fetched?: number;
+  posted?: number;
+}
+
 interface DB {
   problems: Record<string, ProblemRecord>;
   ctfProblems: Record<string, CtfProblem>;
@@ -69,6 +93,10 @@ interface DB {
   features: Record<string, string[]>;
   /** `${guildId}` -> 입장/퇴장 로그 채널 ID */
   logChannels: Record<string, string>;
+  /** `${guildId}:${itemId}` -> 보안뉴스/행사 수집 항목 */
+  eventItems: Record<string, EventItem>;
+  /** `${guildId}` -> 마지막 보안뉴스/행사 수집 상태 */
+  eventStatus: Record<string, EventStatus>;
 }
 
 const empty: DB = {
@@ -80,6 +108,8 @@ const empty: DB = {
   ctfTimes: {},
   features: {},
   logChannels: {},
+  eventItems: {},
+  eventStatus: {},
 };
 
 function load(): DB {
@@ -236,5 +266,26 @@ export function getLogChannel(guildId: string): string | undefined {
 }
 export function setLogChannel(guildId: string, channelId: string) {
   db.logChannels[guildId] = channelId;
+  save();
+}
+
+// ── 보안뉴스 / 행사 공지 ─────────────────────────────────────────────
+export function getGuildEventItems(guildId: string): EventItem[] {
+  return Object.values(db.eventItems)
+    .filter((item) => item.guildId === guildId)
+    .sort((a, b) => b.publishedAt - a.publishedAt);
+}
+export function hasEventItem(guildId: string, id: string): boolean {
+  return Boolean(db.eventItems[`${guildId}:${id}`]);
+}
+export function addEventItem(item: EventItem) {
+  db.eventItems[`${item.guildId}:${item.id}`] = item;
+  save();
+}
+export function getEventStatus(guildId: string): EventStatus {
+  return db.eventStatus[guildId] ?? {};
+}
+export function setEventStatus(guildId: string, status: EventStatus) {
+  db.eventStatus[guildId] = status;
   save();
 }

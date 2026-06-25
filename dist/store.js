@@ -30,9 +30,14 @@ exports.getFeatures = getFeatures;
 exports.setFeatures = setFeatures;
 exports.getLogChannel = getLogChannel;
 exports.setLogChannel = setLogChannel;
+exports.getGuildEventItems = getGuildEventItems;
+exports.hasEventItem = hasEventItem;
+exports.addEventItem = addEventItem;
+exports.getEventStatus = getEventStatus;
+exports.setEventStatus = setEventStatus;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
-const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
+const DB_PATH = process.env.DATABASE_PATH?.trim() || (0, node_path_1.join)(process.cwd(), "data.json");
 /** 대소문자/공백 무시 비교용 키 */
 function keyOf(s) {
     return s.trim().toLowerCase();
@@ -46,6 +51,8 @@ const empty = {
     ctfTimes: {},
     features: {},
     logChannels: {},
+    eventItems: {},
+    eventStatus: {},
 };
 function load() {
     if (!(0, node_fs_1.existsSync)(DB_PATH))
@@ -196,5 +203,25 @@ function getLogChannel(guildId) {
 }
 function setLogChannel(guildId, channelId) {
     db.logChannels[guildId] = channelId;
+    save();
+}
+// ── 보안뉴스 / 행사 공지 ─────────────────────────────────────────────
+function getGuildEventItems(guildId) {
+    return Object.values(db.eventItems)
+        .filter((item) => item.guildId === guildId)
+        .sort((a, b) => b.publishedAt - a.publishedAt);
+}
+function hasEventItem(guildId, id) {
+    return Boolean(db.eventItems[`${guildId}:${id}`]);
+}
+function addEventItem(item) {
+    db.eventItems[`${item.guildId}:${item.id}`] = item;
+    save();
+}
+function getEventStatus(guildId) {
+    return db.eventStatus[guildId] ?? {};
+}
+function setEventStatus(guildId, status) {
+    db.eventStatus[guildId] = status;
     save();
 }
