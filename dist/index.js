@@ -49,9 +49,11 @@ const drafts = new Map();
 const ctfDrafts = new Map();
 /** /ctf solve 진행 상태: userId -> { problemId, solver?, helpers? } */
 const ctfSolveDrafts = new Map();
-const client = new discord_js_1.Client({
-    intents: [discord_js_1.GatewayIntentBits.Guilds, discord_js_1.GatewayIntentBits.GuildMembers, discord_js_1.GatewayIntentBits.GuildInvites],
-});
+const intents = [discord_js_1.GatewayIntentBits.Guilds];
+if (process.env.ENABLE_LOGGING_INTENTS === "true") {
+    intents.push(discord_js_1.GatewayIntentBits.GuildMembers, discord_js_1.GatewayIntentBits.GuildInvites);
+}
+const client = new discord_js_1.Client({ intents });
 // ── 슬래시 명령어 정의 (기능별) ───────────────────────────────────────
 const ctfFeatureCommands = [
     new discord_js_1.SlashCommandBuilder()

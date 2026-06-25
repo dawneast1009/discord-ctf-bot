@@ -121,9 +121,11 @@ const ctfDrafts = new Map<string, CtfDraftState>();
 /** /ctf solve 진행 상태: userId -> { problemId, solver?, helpers? } */
 const ctfSolveDrafts = new Map<string, { problemId: string; solver?: string; helpers?: string[] }>();
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildInvites],
-});
+const intents = [GatewayIntentBits.Guilds];
+if (process.env.ENABLE_LOGGING_INTENTS === "true") {
+  intents.push(GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildInvites);
+}
+const client = new Client({ intents });
 
 // ── 슬래시 명령어 정의 (기능별) ───────────────────────────────────────
 const ctfFeatureCommands = [
