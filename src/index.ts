@@ -253,9 +253,20 @@ const eventFeatureCommands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("event_import_url")
+    .setDescription("사이트 상세 페이지 링크를 읽어 행사로 등록합니다")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o.setName("url").setDescription("분석할 상세 페이지 URL").setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("event_reset")
     .setDescription("보안뉴스/행사 수집 기록을 초기화합니다")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addBooleanOption((o) => o.setName("confirm").setDescription("true면 즉시 삭제합니다").setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("event_list_manual")
+    .setDescription("수동 등록 행사 목록을 조회합니다")
     .toJSON(),
 ];
 
@@ -290,7 +301,9 @@ const COMMAND_FEATURE: Record<string, string> = {
   event_add: "events",
   event_remove: "events",
   event_import: "events",
+  event_import_url: "events",
   event_reset: "events",
+  event_list_manual: "events",
   로그채널: "logging",
   로그채널확인: "logging",
 };
@@ -574,7 +587,11 @@ async function deleteChannelSafe(id: string) {
 
 async function resetEventFeature(guild: Guild): Promise<{ channels: number; items: number }> {
   const items = getGuildEventItems(guild.id);
-  const keys = [...getForumKeysFor(guild.id, "events:"), ...getForumKeysFor(guild.id, "eventindex:")];
+  const keys = [
+    ...getForumKeysFor(guild.id, "events:"),
+    ...getForumKeysFor(guild.id, "eventindex:"),
+    ...getForumKeysFor(guild.id, "eventcat:"),
+  ];
   let channels = 0;
   for (const key of keys) {
     const channelId = getForumFor(guild.id, key);
@@ -772,8 +789,8 @@ const DEFAULT_EVENT_PAGES = [
 const EVENT_KIND_LABELS: Record<string, string> = {
   ctf: "CTF 대회",
   ai: "AI 경진대회",
-  conference: "보안 컨퍼런스",
-  hackathon: "보안 해커톤",
+  conference: "국내 보안 컨퍼런스",
+  hackathon: "국내 해커톤",
   security: "기타 정보보안",
   news: "정보보안 소식",
 };
@@ -786,16 +803,10 @@ const EVENT_BUCKET_LABELS: Record<string, string> = {
   unknown: "날짜-미정",
 };
 
-function monthKey(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 7);
-}
-
 function eventForumKey(item: EventItem): string {
   const kind = item.kind ?? "security";
-  if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
-    return `events:${kind}:month:${monthKey(item.startsAt)}`;
-  }
-  return `events:${kind}:main`;
+  if (kind === "news") return "events:news:main";
+  return `events:${kind}:bucket:${item.bucket ?? "unknown"}`;
 }
 
 function eventFeedUrls(): string[] {
@@ -1045,6 +1056,12 @@ async function fetchEventPage(source: { name: string; url: string }): Promise<Ev
   return items;
 }
 
+async function fetchSingleEventUrl(url: string): Promise<EventItem | null> {
+  const source = { name: new URL(url).hostname, url };
+  const items = await fetchEventPage(source);
+  return items[0] ?? null;
+}
+
 async function fetchNaverSearchEvents(): Promise<EventItem[]> {
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
@@ -1110,11 +1127,51 @@ async function fetchNaverSearchEvents(): Promise<EventItem[]> {
 async function ensureEventForum(guild: Guild, item: EventItem): Promise<ForumChannel> {
   const kind = item.kind ?? "security";
   const kindLabel = EVENT_KIND_LABELS[kind] ?? "보안 행사";
-  if ((kind === "ctf" || kind === "ai" || kind === "hackathon") && item.startsAt) {
-    const month = monthKey(item.startsAt);
-    return ensureForum(guild, eventForumKey(item), `${kindLabel}-${month}`);
+  const categoryId = await ensureEventCategory(guild, kind);
+  const key = eventForumKey(item);
+  const existingId = getForumFor(guild.id, key);
+  if (existingId) {
+    const ch = guild.channels.cache.get(existingId) ?? (await guild.channels.fetch(existingId).catch(() => null));
+    if (ch && ch.type === ChannelType.GuildForum) return ch as ForumChannel;
   }
-  return ensureForum(guild, eventForumKey(item), kindLabel);
+
+  if (kind === "news") {
+    const ch = await guild.channels.create({
+      name: kindLabel,
+      type: ChannelType.GuildForum,
+      parent: categoryId,
+      topic: `${kindLabel} 공지와 소식`,
+    });
+    setForumFor(guild.id, key, ch.id);
+    return ch as ForumChannel;
+  }
+
+  const bucket = item.bucket ?? "unknown";
+  const bucketLabel = EVENT_BUCKET_LABELS[bucket] ?? bucket;
+  const ch = await guild.channels.create({
+    name: bucketLabel,
+    type: ChannelType.GuildForum,
+    parent: categoryId,
+    topic: `${kindLabel} · ${bucketLabel}`,
+  });
+  setForumFor(guild.id, key, ch.id);
+  return ch as ForumChannel;
+}
+
+async function ensureEventCategory(guild: Guild, kind: string): Promise<string> {
+  const label = EVENT_KIND_LABELS[kind] ?? "보안 행사";
+  const key = `eventcat:${kind}`;
+  const existingId = getForumFor(guild.id, key);
+  if (existingId) {
+    const ch = guild.channels.cache.get(existingId) ?? (await guild.channels.fetch(existingId).catch(() => null));
+    if (ch && ch.type === ChannelType.GuildCategory) return ch.id;
+  }
+  const ch = await guild.channels.create({
+    name: label.slice(0, 95),
+    type: ChannelType.GuildCategory,
+  });
+  setForumFor(guild.id, key, ch.id);
+  return ch.id;
 }
 
 async function updateEventIndex(guild: Guild, forum: ForumChannel, key: string) {
@@ -1276,12 +1333,13 @@ function parseManualEventLine(line: string): EventItem | null {
     id: eventId(link, `manual:${title}`),
     guildId: "",
     title,
-    link,
-    source: "Manual",
-    kind,
-    summary: datePart ? `수동 등록 날짜: ${datePart}` : "",
-    publishedAt: startsAt ?? Date.now(),
-    startsAt,
+      link,
+      source: "Manual",
+      kind,
+      summary: datePart ? `수동 등록 날짜: ${datePart}` : "",
+      publishedAt: startsAt ?? Date.now(),
+      startsAt,
+      manual: true,
   };
   item.bucket = bucketForEvent(item);
   return item;
@@ -1325,6 +1383,7 @@ async function handleEventCommand(interaction: ChatInputCommandInteraction) {
       summary: date ? `수동 등록 날짜: ${date}` : "",
       publishedAt: startsAt ?? Date.now(),
       startsAt,
+      manual: true,
     };
     item.bucket = bucketForEvent(item);
     const posted = await publishEventItem(interaction.guild, item);
@@ -1347,9 +1406,20 @@ async function handleEventCommand(interaction: ChatInputCommandInteraction) {
     return interaction.showModal(modal);
   }
 
+  if (interaction.commandName === "event_import_url") {
+    if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const url = interaction.options.getString("url", true).trim();
+    const item = await fetchSingleEventUrl(url).catch(() => null);
+    if (!item) return interaction.editReply("❌ 해당 URL에서 행사 정보를 찾지 못했습니다.");
+    item.manual = true;
+    const posted = await publishEventItem(interaction.guild, item);
+    return interaction.editReply(posted ? `✅ 등록했습니다: ${item.title}` : "이미 등록된 항목입니다.");
+  }
+
   if (interaction.commandName === "event_remove") {
     if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
-    const items = getGuildEventItems(interaction.guild.id).slice(0, 25);
+    const items = getGuildEventItems(interaction.guild.id).filter((item) => item.manual).slice(0, 25);
     if (items.length === 0) return interaction.reply({ content: "삭제할 항목이 없습니다.", ephemeral: true });
     const menu = new StringSelectMenuBuilder()
       .setCustomId("eventremove_select")
@@ -1370,6 +1440,11 @@ async function handleEventCommand(interaction: ChatInputCommandInteraction) {
 
   if (interaction.commandName === "event_reset") {
     if (!isAdmin(interaction)) return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+    if (interaction.options.getBoolean("confirm") === true) {
+      await interaction.deferReply({ ephemeral: true });
+      const result = await resetEventFeature(interaction.guild);
+      return interaction.editReply(`🧨 리셋 완료: 채널/스레드 ${result.channels}개 삭제, 수집 기록 ${result.items}개 초기화`);
+    }
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("eventreset_confirm").setLabel("삭제").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId("eventreset_cancel").setLabel("취소").setStyle(ButtonStyle.Secondary),
@@ -1379,6 +1454,21 @@ async function handleEventCommand(interaction: ChatInputCommandInteraction) {
       components: [row],
       ephemeral: true,
     });
+  }
+
+  if (interaction.commandName === "event_list_manual") {
+    const items = getGuildEventItems(interaction.guild.id).filter((item) => item.manual).slice(0, 25);
+    if (items.length === 0) return interaction.reply({ content: "수동 등록 행사가 없습니다.", ephemeral: true });
+    const embed = new EmbedBuilder()
+      .setTitle("수동 등록 행사")
+      .setColor(0x2b8a3e)
+      .setDescription(
+        items
+          .map((item) => `• ${item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "날짜 미정"} [${item.title}](${item.link})`)
+          .join("\n")
+          .slice(0, 4000),
+      );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   if (interaction.commandName === "event_status") {
