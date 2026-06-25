@@ -919,19 +919,29 @@ async function fetchEventFeed(url) {
     })
         .filter((item) => item.title && item.link && isUsefulEventItem(item.title, item.summary ?? ""));
 }
-async function fetchCtftimeEvents() {
-    const now = Math.floor(Date.now() / 1000);
-    const lookaheadDays = Math.max(30, Number(process.env.LOOKAHEAD_DAYS ?? 365) || 365);
-    const finish = now + lookaheadDays * 86400;
-    const res = await fetch(`https://ctftime.org/api/v1/events/?limit=100&start=${now}&finish=${finish}`, {
+async function fetchCtftimeRange(start, finish, limit) {
+    const res = await fetch(`https://ctftime.org/api/v1/events/?limit=${limit}&start=${start}&finish=${finish}`, {
         headers: { "User-Agent": "discord-ctf-bot/1.0 (+Discord CTF event aggregator)" },
     });
     if (!res.ok)
         throw new Error(`CTFtime 응답 실패 ${res.status}`);
     const json = await res.json();
-    if (!Array.isArray(json))
-        return [];
-    return json
+    return Array.isArray(json) ? json : [];
+}
+async function fetchCtftimeEvents() {
+    const now = Math.floor(Date.now() / 1000);
+    const lookaheadDays = Math.max(30, Number(process.env.LOOKAHEAD_DAYS ?? 365) || 365);
+    // 원본 봇과 동일: 진행 중/방금 시작한 대회까지 잡으려고 두 구간을 합친다.
+    //  - 미래: now-12h ~ now+lookahead (진행 중인 CTF 포함)
+    //  - 최근: now-14d ~ now (막 끝난 CTF 포함)
+    const [futureRows, recentRows] = await Promise.all([
+        fetchCtftimeRange(now - 12 * 3600, now + lookaheadDays * 86400, 200),
+        fetchCtftimeRange(now - 14 * 86400, now, 100),
+    ]);
+    const byId = new Map();
+    for (const row of [...recentRows, ...futureRows])
+        byId.set(String(row?.id), row);
+    return [...byId.values()]
         .map((event) => {
         const title = String(event.title ?? "").trim();
         const link = String(event.url || event.ctftime_url || "").trim();
