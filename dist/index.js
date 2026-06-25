@@ -662,6 +662,20 @@ const EVENT_BUCKETS_BY_KIND = {
     security: ["within_1m", "within_2m", "later", "ended"],
     news: ["latest"],
 };
+const EVENT_SOURCE_PRIORITY = {
+    Manual: 0,
+    "K-CTF": 1,
+    CTFtime: 2,
+    DACON: 3,
+    CODEGATE: 4,
+    SECON: 4,
+    한국코드페어: 4,
+    WACON: 4,
+    KISA: 5,
+    KISIA: 5,
+    보안뉴스: 5,
+    "검색API-보안뉴스": 6,
+};
 function eventForumKey(item) {
     const kind = item.kind ?? "security";
     if (kind === "news")
@@ -706,6 +720,40 @@ function stripHtml(input) {
 function normalizeWhitespace(input) {
     return decodeXml(input).replace(/\s+/g, " ").trim();
 }
+function labelValue(text, labels) {
+    for (const raw of text.split(/\r?\n| {2,}/)) {
+        const line = normalizeWhitespace(raw);
+        if (!labels.test(line))
+            continue;
+        const value = line.split(/[:：]| - /).slice(1).join(":").trim();
+        if (value)
+            return value.slice(0, 300);
+        if (line.length <= 120)
+            return line.slice(0, 300);
+    }
+    return undefined;
+}
+function enrichEventDetails(item, text) {
+    const clean = normalizeWhitespace(text);
+    item.organizer ??= labelValue(text, /^(주최|주관|운영|host|organizer)/i);
+    item.eligibility ??= labelValue(text, /^(참가\s*대상|참가\s*자격|대상|eligibility|target)/i);
+    item.registration ??= labelValue(text, /^(모집|신청|접수|등록|사전\s*등록|registration)/i);
+    item.location ??= labelValue(text, /^(장소|위치|개최\s*장소|진행\s*장소|location|venue)/i);
+    item.teamLimit ??= labelValue(text, /^(팀\s*(구성|인원|제한)|참가\s*인원|인원\s*제한|team)/i);
+    item.participationMode ??= participationMode(clean, item.location);
+}
+function participationMode(text, location) {
+    const combined = `${text} ${location ?? ""}`;
+    const online = /\bonline\b|온라인|비대면|remote|virtual/i.test(combined);
+    const offline = /\boffline\b|오프라인|대면|현장|서울|부산|대전|인천|광주|대구|제주|코엑스|coex|대학교|센터/i.test(combined);
+    if (online && offline)
+        return "온·오프라인 병행";
+    if (online)
+        return "온라인";
+    if (offline)
+        return "오프라인";
+    return "정보 없음";
+}
 function tagValue(xml, tag) {
     return decodeXml(xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "i"))?.[1] ?? "");
 }
@@ -724,6 +772,22 @@ function absoluteUrl(base, href) {
 }
 function eventId(link, title) {
     return (0, node_crypto_1.createHash)("sha1").update(link || title).digest("hex").slice(0, 16);
+}
+function normalizedEventTitle(title) {
+    return title
+        .replace(/\[[^\]]+\]/g, " ")
+        .replace(/\([^)]*(?:종합|속보|단독|포토|영상|그래픽|보도자료)[^)]*\)/g, " ")
+        .replace(/["'“”‘’]/g, "")
+        .replace(/\s*[-|:]\s*(?:보안뉴스|데일리시큐|전자신문|아이뉴스24|ZDNET Korea|지디넷코리아|연합뉴스|뉴스1|뉴시스|매일경제|한국경제|이데일리|파이낸셜뉴스).*$/i, "")
+        .replace(/[^a-z0-9가-힣]+/gi, "")
+        .toLowerCase();
+}
+function eventDedupeKey(item) {
+    const title = normalizedEventTitle(item.title);
+    const summary = normalizedEventTitle(item.summary ?? "").slice(0, 120);
+    const contentKey = item.kind === "news" && summary ? `${title}:${summary}` : title;
+    const day = item.kind === "news" ? "" : item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "";
+    return `${item.kind ?? "security"}:${contentKey}:${day}`;
 }
 function isUsefulEventItem(title, summary) {
     const text = `${title} ${summary}`.toLowerCase();
@@ -838,7 +902,7 @@ async function fetchEventFeed(url) {
         const pubDate = Date.parse(tagValue(block, "pubDate") || tagValue(block, "updated"));
         const startsAt = extractDateMs(`${title} ${summary}`);
         const kind = classifyEvent(title, summary);
-        return {
+        const item = {
             id: eventId(link, title),
             guildId: "",
             title,
@@ -850,6 +914,8 @@ async function fetchEventFeed(url) {
             startsAt,
             bucket: bucketForEvent({ kind, title, startsAt, publishedAt: Number.isFinite(pubDate) ? pubDate : Date.now() }),
         };
+        enrichEventDetails(item, `${title}\n${summary}`);
+        return item;
     })
         .filter((item) => item.title && item.link && isUsefulEventItem(item.title, item.summary ?? ""));
 }
@@ -872,6 +938,11 @@ async function fetchCtftimeEvents() {
         const startsAt = Date.parse(event.start);
         const endsAt = Date.parse(event.finish);
         const publishedAt = Number.isFinite(startsAt) ? startsAt : Date.now();
+        const organizers = Array.isArray(event.organizers)
+            ? event.organizers.map((org) => org?.name).filter(Boolean).join(", ")
+            : "";
+        const location = event.location ? String(event.location) : undefined;
+        const description = event.description ? stripHtml(String(event.description)) : "";
         const item = {
             id: eventId(link || String(event.id), `ctftime:${event.id}:${title}`),
             guildId: "",
@@ -879,10 +950,14 @@ async function fetchCtftimeEvents() {
             link: link || String(event.ctftime_url || "https://ctftime.org/event/list/"),
             source: "CTFtime",
             kind: "ctf",
-            summary: event.description ? stripHtml(String(event.description)) : "",
+            summary: description,
             publishedAt,
             startsAt: Number.isFinite(startsAt) ? startsAt : undefined,
             endsAt: Number.isFinite(endsAt) ? endsAt : undefined,
+            organizer: organizers || undefined,
+            location,
+            participationMode: participationMode(`${event.format ?? ""} ${description}`, location),
+            genres: Array.isArray(event.categories) ? event.categories.map((x) => String(x?.name ?? x)).filter(Boolean) : undefined,
         };
         item.bucket = bucketForEvent(item);
         return item;
@@ -925,6 +1000,7 @@ async function fetchEventPage(source) {
             publishedAt,
             startsAt,
         };
+        enrichEventDetails(item, context);
         item.bucket = bucketForEvent(item);
         items.push(item);
     }
@@ -943,6 +1019,7 @@ async function fetchEventPage(source) {
             publishedAt: startsAt ?? Date.now(),
             startsAt,
         };
+        enrichEventDetails(item, html);
         item.bucket = bucketForEvent(item);
         items.push(item);
     }
@@ -1025,6 +1102,7 @@ async function fetchNaverSearchEvents() {
                     publishedAt: Number.isFinite(pubDate) ? pubDate : Date.now(),
                     startsAt: kind === "news" ? (Number.isFinite(pubDate) ? pubDate : Date.now()) : startsAt,
                 };
+                enrichEventDetails(item, `${title}\n${summary}`);
                 item.bucket = bucketForEvent(item);
                 out.push(item);
             }
@@ -1133,10 +1211,13 @@ async function publishEventItem(guild, item) {
     next.bucket = bucketForEvent(next);
     if ((0, store_1.hasEventItem)(guild.id, next.id))
         return false;
+    const dedupeKey = eventDedupeKey(next);
+    if ((0, store_1.getGuildEventItems)(guild.id).some((item) => eventDedupeKey(item) === dedupeKey))
+        return false;
     const forum = await ensureEventForum(guild, next);
     const forumKey = eventForumKey(next);
     const post = await forum.threads.create({
-        name: `${next.startsAt ? new Date(next.startsAt).toISOString().slice(0, 10) : "날짜 미정"} ${next.title}`.slice(0, 95),
+        name: eventPostTitle(next),
         message: { embeds: [eventEmbed(next)] },
         reason: `보안뉴스/행사 등록: ${next.title}`,
     });
@@ -1144,23 +1225,80 @@ async function publishEventItem(guild, item) {
     await updateEventIndex(guild, forum, forumKey);
     return true;
 }
+function eventPostTitle(item) {
+    const day = item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "날짜 미정";
+    const region = eventRegion(item);
+    const label = item.kind === "ctf"
+        ? region === "kr"
+            ? "한국 CTF"
+            : "해외 CTF"
+        : item.kind === "ai"
+            ? "AI 경진대회"
+            : item.kind === "hackathon"
+                ? region === "kr"
+                    ? "국내 해커톤"
+                    : "해외 해커톤"
+                : item.kind === "conference"
+                    ? "국내 컨퍼런스"
+                    : item.kind === "news"
+                        ? "정보보안 소식"
+                        : "기타 정보보안";
+    return `${day} [${label}] ${item.title}`.slice(0, 95);
+}
+function eventRegion(item) {
+    if (item.region === "kr" || item.region === "global")
+        return item.region;
+    const text = `${item.source} ${item.link} ${item.title} ${item.summary ?? ""} ${item.location ?? ""}`;
+    if (/\.kr\b|kisa|kisia|kctf|codegate|secon|wacon|dacon|데이콘|한국|국내|서울|부산|대전|인천|광주|대구|제주/i.test(text)) {
+        return "kr";
+    }
+    return "global";
+}
 function eventEmbed(item) {
-    const when = item.startsAt
-        ? item.endsAt
-            ? `<t:${Math.floor(item.startsAt / 1000)}:f> ~ <t:${Math.floor(item.endsAt / 1000)}:f>`
-            : `<t:${Math.floor(item.startsAt / 1000)}:f>`
-        : "날짜 미정";
+    const missing = "명시되어 있지 않음";
+    const isConference = item.kind === "conference";
+    const isOther = item.kind === "security";
+    const isNews = item.kind === "news";
     const embed = new discord_js_1.EmbedBuilder()
         .setTitle(item.title.slice(0, 256))
         .setURL(item.link)
-        .setColor(0x2b8a3e)
-        .addFields({ name: "분류", value: EVENT_KIND_LABELS[item.kind ?? "security"] ?? "보안 행사", inline: true }, { name: "일정", value: when, inline: true }, { name: "출처", value: item.source.slice(0, 100), inline: true })
+        .setColor(0x5865f2)
         .setTimestamp(item.publishedAt);
     const hint = translatedHint(item);
-    const description = [hint, item.summary?.slice(0, 600)].filter(Boolean).join("\n\n");
+    const description = [hint, item.summary?.slice(0, 350)].filter(Boolean).join("\n\n");
     if (description)
         embed.setDescription(description);
+    if (isNews) {
+        embed.addFields({ name: "소식", value: item.title || missing, inline: false }, { name: "게시일", value: formatDiscordTime(item.startsAt ?? item.publishedAt), inline: false }, { name: "원문 링크", value: item.link || missing, inline: false });
+        embed.setFooter({ text: `출처: ${item.source}` });
+        return embed;
+    }
+    embed.addFields({ name: isOther ? "프로그램명" : isConference ? "행사명" : "대회명", value: item.title || missing, inline: false }, { name: "주최 기관", value: item.organizer || missing, inline: true }, { name: "참가 대상", value: item.eligibility || missing, inline: true }, {
+        name: isOther ? "모집 일정" : isConference ? "사전 등록 일정" : "모집 및 접수 일정",
+        value: item.registration || (item.registrationDeadline ? `접수 마감: ${formatDiscordTime(item.registrationDeadline)}` : missing),
+        inline: false,
+    });
+    if (item.startsAt) {
+        embed.addFields({
+            name: isOther ? "교육 일정" : isConference ? "행사 일정" : "대회 일정",
+            value: item.endsAt ? `${formatDiscordTime(item.startsAt)} ~ ${formatDiscordTime(item.endsAt)}` : formatDiscordTime(item.startsAt),
+            inline: false,
+        });
+    }
+    if (item.genres?.length && !isConference && !isOther)
+        embed.addFields({ name: "분야", value: item.genres.join(" · "), inline: false });
+    if (item.teamLimit && !isConference && !isOther)
+        embed.addFields({ name: "팀 제한", value: item.teamLimit, inline: true });
+    embed.addFields({ name: "진행 방식", value: item.participationMode || "정보 없음", inline: true });
+    embed.addFields({ name: "장소", value: item.location || missing, inline: true });
+    embed.addFields({ name: isOther ? "안내 링크" : isConference ? "행사 링크" : "대회 링크", value: item.registrationUrl || item.link || missing, inline: false });
+    if (item.posterUrl)
+        embed.setImage(item.posterUrl);
+    embed.setFooter({ text: `출처: ${item.source}` });
     return embed;
+}
+function formatDiscordTime(ms) {
+    return `<t:${Math.floor(ms / 1000)}:f>`;
 }
 async function syncEvents(guild) {
     const items = [];
@@ -1201,23 +1339,25 @@ async function syncEvents(guild) {
         next.bucket = bucketForEvent(next);
         if (!shouldPublishAutoEvent(next))
             continue;
-        unique.set(item.id, next);
+        const dedupeKey = eventDedupeKey(next);
+        const existing = unique.get(dedupeKey);
+        const existingPriority = existing ? EVENT_SOURCE_PRIORITY[existing.source] ?? 10 : 99;
+        const nextPriority = EVENT_SOURCE_PRIORITY[next.source] ?? 10;
+        if (!existing || nextPriority < existingPriority)
+            unique.set(dedupeKey, next);
     }
     let posted = 0;
     const touchedForums = new Map();
     for (const item of [...unique.values()].sort((a, b) => (a.startsAt ?? a.publishedAt) - (b.startsAt ?? b.publishedAt)).slice(0, 100)) {
-        if ((0, store_1.hasEventItem)(guild.id, item.id))
-            continue;
-        const forum = await ensureEventForum(guild, item);
-        const forumKey = eventForumKey(item);
-        const post = await forum.threads.create({
-            name: `${item.startsAt ? new Date(item.startsAt).toISOString().slice(0, 10) : "날짜 미정"} ${item.title}`.slice(0, 95),
-            message: { embeds: [eventEmbed(item)] },
-            reason: `보안뉴스/행사 수집: ${item.title}`,
-        });
-        (0, store_1.addEventItem)({ ...item, postedAt: Date.now(), messageId: post.id });
-        touchedForums.set(forumKey, forum);
-        posted++;
+        const before = (0, store_1.getGuildEventItems)(guild.id).length;
+        if (await publishEventItem(guild, item).catch(() => false)) {
+            const saved = (0, store_1.getGuildEventItems)(guild.id)[0];
+            if (saved && (0, store_1.getGuildEventItems)(guild.id).length > before) {
+                const forum = await ensureEventForum(guild, saved);
+                touchedForums.set(eventForumKey(saved), forum);
+            }
+            posted++;
+        }
     }
     for (const [key, forum] of touchedForums)
         await updateEventIndex(guild, forum, key);

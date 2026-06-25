@@ -62,6 +62,17 @@ export interface EventItem {
   source: string;
   kind?: string;
   summary?: string;
+  organizer?: string;
+  eligibility?: string;
+  registration?: string;
+  registrationUrl?: string;
+  registrationDeadline?: number;
+  genres?: string[];
+  teamLimit?: string;
+  participationMode?: string;
+  location?: string;
+  posterUrl?: string;
+  region?: string;
   publishedAt: number;
   startsAt?: number;
   endsAt?: number;
