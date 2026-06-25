@@ -49,9 +49,11 @@ const drafts = new Map();
 const ctfDrafts = new Map();
 /** /ctf solve 진행 상태: userId -> { problemId, solver?, helpers? } */
 const ctfSolveDrafts = new Map();
-const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
-// ── 슬래시 명령어 정의 ────────────────────────────────────────────────
-const commands = [
+const client = new discord_js_1.Client({
+    intents: [discord_js_1.GatewayIntentBits.Guilds, discord_js_1.GatewayIntentBits.GuildMembers, discord_js_1.GatewayIntentBits.GuildInvites],
+});
+// ── 슬래시 명령어 정의 (기능별) ───────────────────────────────────────
+const ctfFeatureCommands = [
     new discord_js_1.SlashCommandBuilder()
         .setName("문제")
         .setDescription("드림핵식 CTF 문제 관리")
@@ -89,26 +91,81 @@ const commands = [
         .addStringOption((o) => o.setName("기간").setDescription("지금부터 진행 시간. 예: 24h, 2d, 1d12h").setRequired(true)))
         .toJSON(),
 ];
+const loggingFeatureCommands = [
+    new discord_js_1.SlashCommandBuilder()
+        .setName("로그채널")
+        .setDescription("입장/퇴장 로그를 보낼 채널을 설정합니다")
+        .addChannelOption((o) => o.setName("채널").setDescription("로그를 보낼 채널").setRequired(true))
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .toJSON(),
+    new discord_js_1.SlashCommandBuilder()
+        .setName("로그채널확인")
+        .setDescription("현재 설정된 로그 채널을 확인합니다")
+        .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+        .toJSON(),
+];
+// 항상 등록되는 기능 관리 명령어
+const botCommand = new discord_js_1.SlashCommandBuilder()
+    .setName("봇")
+    .setDescription("봇 기능 켜기/끄기")
+    .setDefaultMemberPermissions(discord_js_1.PermissionFlagsBits.Administrator)
+    .addSubcommandGroup((g) => g
+    .setName("기능")
+    .setDescription("기능 관리")
+    .addSubcommand((s) => s.setName("추가").setDescription("기능을 켭니다 (해당 명령어가 보이게 됩니다)"))
+    .addSubcommand((s) => s.setName("삭제").setDescription("기능을 끕니다"))
+    .addSubcommand((s) => s.setName("목록").setDescription("켜진 기능을 봅니다")))
+    .toJSON();
+// 기능 레지스트리
+const FEATURES = {
+    ctf: { label: "CTF · 드림핵 문제 관리", desc: "/문제, /ctf 명령어", commands: ctfFeatureCommands },
+    logging: { label: "입장/퇴장 로그", desc: "/로그채널 + 초대 추적·입퇴장 알림", commands: loggingFeatureCommands },
+};
+/** 각 명령어가 속한 기능 키 */
+const COMMAND_FEATURE = {
+    문제: "ctf",
+    ctf: "ctf",
+    로그채널: "logging",
+    로그채널확인: "logging",
+};
+function commandsForGuild(guildId) {
+    const out = [botCommand];
+    for (const key of (0, store_1.getFeatures)(guildId)) {
+        if (FEATURES[key])
+            out.push(...FEATURES[key].commands);
+    }
+    return out;
+}
+async function registerGuild(guild) {
+    await guild.commands.set(commandsForGuild(guild.id)).catch((e) => console.error(`명령어 등록 실패(${guild.id}):`, e?.message ?? e));
+}
+const inviteCache = new Map();
+async function cacheInvites(guild) {
+    try {
+        const invites = await guild.invites.fetch();
+        const map = new Map();
+        invites.forEach((inv) => map.set(inv.code, {
+            uses: inv.uses ?? 0,
+            inviterTag: inv.inviter?.tag ?? "알 수 없음",
+            inviterMention: inv.inviter ? `<@${inv.inviter.id}>` : "알 수 없음",
+        }));
+        inviteCache.set(guild.id, map);
+    }
+    catch {
+        /* 권한 없으면 무시 */
+    }
+}
 client.once(discord_js_1.Events.ClientReady, async (c) => {
     console.log(`로그인 완료: ${c.user.tag}`);
-    try {
-        if (GUILD_IDS.length > 0) {
-            for (const gid of GUILD_IDS) {
-                const guild = await c.guilds.fetch(gid).catch(() => null);
-                if (guild) {
-                    await guild.commands.set(commands);
-                    console.log(`길드 명령어 등록: ${guild.name}`);
-                }
-            }
-        }
-        else {
-            await c.application.commands.set(commands);
-            console.log("전역 명령어 등록 완료 (반영까지 최대 1시간)");
-        }
+    for (const guild of c.guilds.cache.values()) {
+        await registerGuild(guild);
+        if ((0, store_1.getFeatures)(guild.id).includes("logging"))
+            await cacheInvites(guild);
     }
-    catch (err) {
-        console.error("명령어 등록 실패:", err);
-    }
+    console.log(`명령어 등록 완료: ${c.guilds.cache.size}개 서버`);
+});
+client.on(discord_js_1.Events.GuildCreate, async (guild) => {
+    await registerGuild(guild);
 });
 // ── 패널 렌더링 ───────────────────────────────────────────────────────
 function buildSourceSelect() {
@@ -346,10 +403,94 @@ client.on(discord_js_1.Events.InteractionCreate, async (interaction) => {
     }
 });
 async function handleCommand(interaction) {
-    if (interaction.commandName === "문제")
+    const name = interaction.commandName;
+    if (name === "봇")
+        return handleBotCommand(interaction);
+    // 꺼진 기능 가드 (보이지 않아야 정상이지만 안전망)
+    const feat = COMMAND_FEATURE[name];
+    if (feat && interaction.guildId && !(0, store_1.getFeatures)(interaction.guildId).includes(feat)) {
+        return interaction.reply({ content: "이 기능은 꺼져 있어요. `/봇 기능 추가` 로 켜주세요.", ephemeral: true });
+    }
+    if (name === "문제")
         return handleProblemCommand(interaction);
-    if (interaction.commandName === "ctf")
+    if (name === "ctf")
         return handleCtfCommand(interaction);
+    if (name === "로그채널" || name === "로그채널확인")
+        return handleLoggingCommand(interaction);
+}
+// ── /봇 기능 토글 ─────────────────────────────────────────────────────
+async function handleBotCommand(interaction) {
+    if (!interaction.guild)
+        return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
+    const sub = interaction.options.getSubcommand();
+    const enabled = (0, store_1.getFeatures)(interaction.guild.id);
+    if (sub === "목록") {
+        const lines = Object.entries(FEATURES).map(([k, f]) => `${enabled.includes(k) ? "🟢" : "⚪"} **${f.label}** — ${f.desc}`);
+        const embed = new discord_js_1.EmbedBuilder().setTitle("🤖 봇 기능").setColor(0x5865f2).setDescription(lines.join("\n"));
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+    if (sub === "추가") {
+        const off = Object.entries(FEATURES).filter(([k]) => !enabled.includes(k));
+        if (off.length === 0)
+            return interaction.reply({ content: "이미 모든 기능이 켜져 있어요.", ephemeral: true });
+        const menu = new discord_js_1.StringSelectMenuBuilder()
+            .setCustomId("feat_add")
+            .setPlaceholder("켤 기능을 고르세요 (여러 개 가능)")
+            .setMinValues(1)
+            .setMaxValues(off.length)
+            .addOptions(off.map(([k, f]) => ({ label: f.label, value: k, description: f.desc.slice(0, 100) })));
+        return interaction.reply({
+            content: "켤 기능을 선택하세요. 선택하면 해당 명령어가 보이게 됩니다.",
+            components: [new discord_js_1.ActionRowBuilder().addComponents(menu)],
+            ephemeral: true,
+        });
+    }
+    if (sub === "삭제") {
+        if (enabled.length === 0)
+            return interaction.reply({ content: "켜진 기능이 없어요.", ephemeral: true });
+        const menu = new discord_js_1.StringSelectMenuBuilder()
+            .setCustomId("feat_del")
+            .setPlaceholder("끌 기능을 고르세요")
+            .setMinValues(1)
+            .setMaxValues(enabled.length)
+            .addOptions(enabled.map((k) => ({ label: FEATURES[k]?.label ?? k, value: k })));
+        return interaction.reply({
+            content: "끌 기능을 선택하세요. 해당 명령어가 숨겨집니다.",
+            components: [new discord_js_1.ActionRowBuilder().addComponents(menu)],
+            ephemeral: true,
+        });
+    }
+}
+// ── 로그 기능 (discord-bot 포팅) ──────────────────────────────────────
+function findLogChannel(guild) {
+    const saved = (0, store_1.getLogChannel)(guild.id);
+    if (saved) {
+        const ch = guild.channels.cache.get(saved);
+        if (ch?.isSendable())
+            return ch;
+    }
+    const guess = guild.channels.cache.find((ch) => ch.isTextBased() && /log|로그|welcome|입장|general|일반/i.test(ch.name));
+    if (guess?.isSendable())
+        return guess;
+    return guild.systemChannel?.isSendable() ? guild.systemChannel : null;
+}
+async function handleLoggingCommand(interaction) {
+    if (!interaction.guild)
+        return interaction.reply({ content: "서버 안에서만 사용할 수 있습니다.", ephemeral: true });
+    if (interaction.commandName === "로그채널") {
+        const channel = interaction.options.getChannel("채널", true);
+        if (!("isTextBased" in channel) || !channel.isTextBased()) {
+            return interaction.reply({ content: "❌ 텍스트 채널만 설정할 수 있어요!", ephemeral: true });
+        }
+        (0, store_1.setLogChannel)(interaction.guild.id, channel.id);
+        await cacheInvites(interaction.guild);
+        return interaction.reply({ content: `✅ 로그 채널이 <#${channel.id}> 로 설정됐어요!`, ephemeral: true });
+    }
+    // 로그채널확인
+    const saved = (0, store_1.getLogChannel)(interaction.guild.id);
+    if (!saved)
+        return interaction.reply({ content: "❌ 설정된 로그 채널이 없어요. `/로그채널 #채널` 로 설정하세요.", ephemeral: true });
+    return interaction.reply({ content: `📌 현재 로그 채널: <#${saved}>`, ephemeral: true });
 }
 async function handleProblemCommand(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -702,6 +843,35 @@ async function handleModal(interaction) {
 }
 async function handleSelect(interaction) {
     const cid = interaction.customId;
+    if (cid === "feat_add" || cid === "feat_del") {
+        if (!interaction.guild)
+            return interaction.update({ content: "서버 안에서만 사용할 수 있습니다.", components: [] });
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const enabled = (0, store_1.getFeatures)(interaction.guild.id);
+        const selected = interaction.values.filter((key) => FEATURES[key]);
+        const next = cid === "feat_add"
+            ? [...new Set([...enabled, ...selected])]
+            : enabled.filter((key) => !selected.includes(key));
+        (0, store_1.setFeatures)(interaction.guild.id, next);
+        await registerGuild(interaction.guild);
+        if (cid === "feat_add" && selected.includes("logging"))
+            await cacheInvites(interaction.guild);
+        const changed = selected.map((key) => FEATURES[key]?.label ?? key).join(", ");
+        const enabledLabels = next.map((key) => FEATURES[key]?.label ?? key);
+        return interaction.update({
+            content: cid === "feat_add"
+                ? `✅ 기능을 켰습니다: ${changed}\n이제 해당 슬래시 명령어가 보입니다.`
+                : `✅ 기능을 껐습니다: ${changed}\n해당 슬래시 명령어를 숨겼습니다.`,
+            embeds: [
+                new discord_js_1.EmbedBuilder()
+                    .setTitle("현재 켜진 기능")
+                    .setColor(0x5865f2)
+                    .setDescription(enabledLabels.length ? enabledLabels.map((label) => `• ${label}`).join("\n") : "켜진 기능이 없습니다."),
+            ],
+            components: [],
+        });
+    }
     if (cid === "src_select") {
         if (interaction.values[0] === "dh") {
             drafts.set(interaction.user.id, {});

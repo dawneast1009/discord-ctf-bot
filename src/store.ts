@@ -65,9 +65,22 @@ interface DB {
   ctfRoles: Record<string, string>;
   /** `${guildId}:${ctfKey}` -> 대회 시작/종료 시각(ms) */
   ctfTimes: Record<string, { startsAt: number; endsAt: number }>;
+  /** `${guildId}` -> 켜진 기능 키 목록 */
+  features: Record<string, string[]>;
+  /** `${guildId}` -> 입장/퇴장 로그 채널 ID */
+  logChannels: Record<string, string>;
 }
 
-const empty: DB = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {}, ctfTimes: {} };
+const empty: DB = {
+  problems: {},
+  ctfProblems: {},
+  forums: {},
+  vaults: {},
+  ctfRoles: {},
+  ctfTimes: {},
+  features: {},
+  logChannels: {},
+};
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -207,5 +220,21 @@ export function setCtfTime(guildId: string, ctfKey: string, startsAt: number, en
 }
 export function removeCtfTime(guildId: string, ctfKey: string) {
   delete db.ctfTimes[`${guildId}:${ctfKey}`];
+  save();
+}
+
+// ── 봇 기능 토글 / 로그 채널 ──────────────────────────────────────────
+export function getFeatures(guildId: string): string[] {
+  return db.features[guildId] ?? [];
+}
+export function setFeatures(guildId: string, keys: string[]) {
+  db.features[guildId] = [...new Set(keys)];
+  save();
+}
+export function getLogChannel(guildId: string): string | undefined {
+  return db.logChannels[guildId];
+}
+export function setLogChannel(guildId: string, channelId: string) {
+  db.logChannels[guildId] = channelId;
   save();
 }

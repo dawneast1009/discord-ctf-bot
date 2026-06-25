@@ -26,6 +26,10 @@ exports.removeCtfRole = removeCtfRole;
 exports.getCtfTime = getCtfTime;
 exports.setCtfTime = setCtfTime;
 exports.removeCtfTime = removeCtfTime;
+exports.getFeatures = getFeatures;
+exports.setFeatures = setFeatures;
+exports.getLogChannel = getLogChannel;
+exports.setLogChannel = setLogChannel;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
@@ -33,7 +37,16 @@ const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
 function keyOf(s) {
     return s.trim().toLowerCase();
 }
-const empty = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {}, ctfTimes: {} };
+const empty = {
+    problems: {},
+    ctfProblems: {},
+    forums: {},
+    vaults: {},
+    ctfRoles: {},
+    ctfTimes: {},
+    features: {},
+    logChannels: {},
+};
 function load() {
     if (!(0, node_fs_1.existsSync)(DB_PATH))
         return structuredClone(empty);
@@ -168,5 +181,20 @@ function setCtfTime(guildId, ctfKey, startsAt, endsAt) {
 }
 function removeCtfTime(guildId, ctfKey) {
     delete db.ctfTimes[`${guildId}:${ctfKey}`];
+    save();
+}
+// ── 봇 기능 토글 / 로그 채널 ──────────────────────────────────────────
+function getFeatures(guildId) {
+    return db.features[guildId] ?? [];
+}
+function setFeatures(guildId, keys) {
+    db.features[guildId] = [...new Set(keys)];
+    save();
+}
+function getLogChannel(guildId) {
+    return db.logChannels[guildId];
+}
+function setLogChannel(guildId, channelId) {
+    db.logChannels[guildId] = channelId;
     save();
 }
