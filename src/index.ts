@@ -814,11 +814,11 @@ const EVENT_BUCKET_LABELS: Record<string, string> = {
   latest: "최신-소식",
 };
 const EVENT_BUCKETS_BY_KIND: Record<string, string[]> = {
-  ctf: ["within_1m", "within_2m", "later", "final", "ended"],
-  ai: ["within_1m", "within_2m", "later", "final", "ended"],
-  conference: ["within_1m", "within_2m", "later", "ended"],
-  hackathon: ["within_1m", "within_2m", "later", "final", "ended"],
-  security: ["within_1m", "within_2m", "later", "ended"],
+  ctf: ["within_1m", "within_2m", "later", "final"],
+  ai: ["within_1m", "within_2m", "later", "final"],
+  conference: ["within_1m", "within_2m", "later"],
+  hackathon: ["within_1m", "within_2m", "later", "final"],
+  security: ["within_1m", "within_2m", "later"],
   news: ["latest"],
 };
 const EVENT_SOURCE_PRIORITY: Record<string, number> = {
@@ -1068,7 +1068,7 @@ function bucketForEvent(item: Pick<EventItem, "kind" | "title" | "startsAt" | "e
   const lowerTitle = item.title.toLowerCase();
   const target = item.endsAt ?? item.startsAt;
   if (item.kind === "news") return "latest";
-  if (target && target < now) return "ended";
+  // 종료(ended) 버킷은 쓰지 않는다 — 끝난 행사는 애초에 게시되지 않음.
   if (item.kind === "ctf" && /final|main round|본선|결승|데모데이/i.test(lowerTitle)) return "final";
   if (!target) return "unknown";
   const days = (target - now) / 86400000;
@@ -1362,7 +1362,7 @@ async function ensureEventForumFor(guild: Guild, kind: string, bucket: string): 
 
 async function ensureEventForums(guild: Guild) {
   for (const kind of Object.keys(EVENT_KIND_LABELS)) {
-    const buckets = EVENT_BUCKETS_BY_KIND[kind] ?? ["within_1m", "within_2m", "later", "ended"];
+    const buckets = EVENT_BUCKETS_BY_KIND[kind] ?? ["within_1m", "within_2m", "later"];
     for (const bucket of buckets) await ensureEventForumFor(guild, kind, bucket);
   }
 }
