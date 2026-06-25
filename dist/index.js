@@ -712,8 +712,11 @@ function isUsefulEventItem(title, summary) {
     return /ctf|해킹방어|사이버공격방어|정보보안|정보보호|보안|취약점|랜섬웨어|해커톤|컨퍼런스|kisa|침해사고|악성코드|제로데이|공모전|교육|캠프|세미나|대회|경진대회|codegate|secon|wacon|dacon|데이콘/i.test(text);
 }
 function classifyEvent(title, summary) {
+    const titleOnly = title.toLowerCase();
     const text = `${title} ${summary}`.toLowerCase();
-    if (/ctf|해킹방어|사이버공격방어|capture the flag|ctftime/i.test(text))
+    if (/ctf|capture the flag|ctftime|codegate|wacon/i.test(titleOnly))
+        return "ctf";
+    if (/해킹방어|사이버공격방어/i.test(titleOnly) && /대회|경진대회|예선|본선|참가|접수|모집|개최|안내/i.test(title))
         return "ctf";
     if (/ai|인공지능|머신러닝|데이터\s*분석|dacon|데이콘/i.test(text))
         return "ai";
@@ -724,6 +727,21 @@ function classifyEvent(title, summary) {
     if (/취약점|랜섬웨어|침해사고|악성코드|제로데이|보안뉴스|security/i.test(text))
         return "news";
     return "security";
+}
+function isEventAnnouncement(title, summary) {
+    const text = `${title} ${summary}`;
+    return /대회|경진대회|해커톤|컨퍼런스|세미나|포럼|교육|캠프|공모전|모집|접수|참가|신청|개최|일정|안내|예선|본선|결승|CTF|CODEGATE|SECON|WACON|DACON/i.test(text);
+}
+function shouldPublishAutoEvent(item) {
+    const now = Date.now();
+    if (item.kind === "news")
+        return item.publishedAt >= now - 30 * 86400000;
+    const target = item.endsAt ?? item.startsAt;
+    if (!target)
+        return false;
+    if (target < now - 86400000)
+        return false;
+    return isEventAnnouncement(item.title, item.summary ?? "");
 }
 function looksMostlyEnglish(input) {
     const letters = input.match(/[A-Za-z]/g)?.length ?? 0;
@@ -948,6 +966,10 @@ async function fetchNaverSearchEvents() {
                 const pubDate = Date.parse(String(row.pubDate ?? ""));
                 const startsAt = extractDateMs(`${title} ${summary}`);
                 const kind = classifyEvent(title, summary);
+                if (!startsAt || startsAt < Date.now() - 86400000 || kind === "news")
+                    continue;
+                if (!isEventAnnouncement(title, summary))
+                    continue;
                 const item = {
                     id: eventId(link, `naver:${api.source}:${title}`),
                     guildId: "",
@@ -1126,6 +1148,8 @@ async function syncEvents(guild) {
         const next = { ...item, guildId: guild.id, startsAt };
         next.kind = next.kind ?? classifyEvent(next.title, next.summary ?? "");
         next.bucket = bucketForEvent(next);
+        if (!shouldPublishAutoEvent(next))
+            continue;
         unique.set(item.id, next);
     }
     let posted = 0;

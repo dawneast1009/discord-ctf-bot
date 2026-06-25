@@ -874,13 +874,29 @@ function isUsefulEventItem(title: string, summary: string): boolean {
 }
 
 function classifyEvent(title: string, summary: string): string {
+  const titleOnly = title.toLowerCase();
   const text = `${title} ${summary}`.toLowerCase();
-  if (/ctf|해킹방어|사이버공격방어|capture the flag|ctftime/i.test(text)) return "ctf";
+  if (/ctf|capture the flag|ctftime|codegate|wacon/i.test(titleOnly)) return "ctf";
+  if (/해킹방어|사이버공격방어/i.test(titleOnly) && /대회|경진대회|예선|본선|참가|접수|모집|개최|안내/i.test(title)) return "ctf";
   if (/ai|인공지능|머신러닝|데이터\s*분석|dacon|데이콘/i.test(text)) return "ai";
   if (/해커톤|hackathon/i.test(text)) return "hackathon";
   if (/컨퍼런스|conference|세미나|포럼|secon|codegate/i.test(text)) return "conference";
   if (/취약점|랜섬웨어|침해사고|악성코드|제로데이|보안뉴스|security/i.test(text)) return "news";
   return "security";
+}
+
+function isEventAnnouncement(title: string, summary: string): boolean {
+  const text = `${title} ${summary}`;
+  return /대회|경진대회|해커톤|컨퍼런스|세미나|포럼|교육|캠프|공모전|모집|접수|참가|신청|개최|일정|안내|예선|본선|결승|CTF|CODEGATE|SECON|WACON|DACON/i.test(text);
+}
+
+function shouldPublishAutoEvent(item: EventItem): boolean {
+  const now = Date.now();
+  if (item.kind === "news") return item.publishedAt >= now - 30 * 86400000;
+  const target = item.endsAt ?? item.startsAt;
+  if (!target) return false;
+  if (target < now - 86400000) return false;
+  return isEventAnnouncement(item.title, item.summary ?? "");
 }
 
 function looksMostlyEnglish(input: string): boolean {
@@ -1104,6 +1120,8 @@ async function fetchNaverSearchEvents(): Promise<EventItem[]> {
         const pubDate = Date.parse(String(row.pubDate ?? ""));
         const startsAt = extractDateMs(`${title} ${summary}`);
         const kind = classifyEvent(title, summary);
+        if (!startsAt || startsAt < Date.now() - 86400000 || kind === "news") continue;
+        if (!isEventAnnouncement(title, summary)) continue;
         const item: EventItem = {
           id: eventId(link, `naver:${api.source}:${title}`),
           guildId: "",
@@ -1289,6 +1307,7 @@ async function syncEvents(guild: Guild): Promise<{ fetched: number; posted: numb
     const next = { ...item, guildId: guild.id, startsAt };
     next.kind = next.kind ?? classifyEvent(next.title, next.summary ?? "");
     next.bucket = bucketForEvent(next);
+    if (!shouldPublishAutoEvent(next)) continue;
     unique.set(item.id, next);
   }
 
