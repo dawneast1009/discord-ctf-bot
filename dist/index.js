@@ -139,7 +139,7 @@ const eventFeatureCommands = [
         .setName("kind")
         .setDescription("분류")
         .setRequired(false)
-        .addChoices({ name: "CTF 대회", value: "ctf" }, { name: "AI 경진대회", value: "ai" }, { name: "보안 컨퍼런스", value: "conference" }, { name: "보안 해커톤", value: "hackathon" }, { name: "정보보안 소식", value: "news" }))
+        .addChoices({ name: "CTF 대회", value: "ctf" }, { name: "AI 경진대회", value: "ai" }, { name: "보안 컨퍼런스", value: "conference" }, { name: "보안 해커톤", value: "hackathon" }, { name: "기타 정보보안", value: "security" }, { name: "정보보안 소식", value: "news" }))
         .toJSON(),
     new discord_js_1.SlashCommandBuilder()
         .setName("event_remove")
@@ -618,7 +618,7 @@ const DEFAULT_EVENT_FEEDS = [
     "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%EC%95%88%20OR%20%EC%B7%A8%EC%95%BD%EC%A0%90%20OR%20%EB%9E%9C%EC%84%AC%EC%9B%A8%EC%96%B4&hl=ko&gl=KR&ceid=KR:ko",
     "https://news.google.com/rss/search?q=CTF%20OR%20%ED%95%B4%ED%82%B9%EB%B0%A9%EC%96%B4%EB%8C%80%ED%9A%8C%20OR%20%EB%B3%B4%EC%95%88%20%ED%95%B4%EC%BB%A4%ED%86%A4%20OR%20%EB%B3%B4%EC%95%88%20%EC%BB%A8%ED%8D%BC%EB%9F%B0%EC%8A%A4&hl=ko&gl=KR&ceid=KR:ko",
     "https://news.google.com/rss/search?q=%EC%A0%95%EB%B3%B4%EB%B3%B4%ED%98%B8%20%EA%B3%B5%EB%AA%A8%EC%A0%84%20OR%20%EC%82%AC%EC%9D%B4%EB%B2%84%EB%B3%B4%EC%95%88%20%EA%B5%90%EC%9C%A1%20OR%20%EB%B3%B4%EC%95%88%20%EC%BA%A0%ED%94%84&hl=ko&gl=KR&ceid=KR:ko",
-    "https://www.boannews.com/media/news_rss.xml",
+    "https://www.boannews.com/media/news_rss.xml?mkind=1",
 ];
 const DEFAULT_EVENT_PAGES = [
     { name: "K-CTF", url: "https://kctf.kr/" },
@@ -648,11 +648,12 @@ const EVENT_BUCKET_LABELS = {
     final: "본선",
     ended: "종료",
     unknown: "날짜-미정",
+    latest: "최신-소식",
 };
 function eventForumKey(item) {
     const kind = item.kind ?? "security";
     if (kind === "news")
-        return "events:news:main";
+        return "events:news:latest";
     return `events:${kind}:bucket:${item.bucket ?? "unknown"}`;
 }
 function eventFeedUrls() {
@@ -711,6 +712,12 @@ function isUsefulEventItem(title, summary) {
     const text = `${title} ${summary}`.toLowerCase();
     return /ctf|해킹방어|사이버공격방어|정보보안|정보보호|보안|취약점|랜섬웨어|해커톤|컨퍼런스|kisa|침해사고|악성코드|제로데이|공모전|교육|캠프|세미나|대회|경진대회|codegate|secon|wacon|dacon|데이콘/i.test(text);
 }
+function isSecurityNews(title, summary) {
+    return /취약점|침해사고|랜섬웨어|악성코드|보안패치|제로데이|CVE|해킹|개인정보|유출|사이버공격|보안뉴스|위협/i.test(`${title} ${summary}`);
+}
+function looksLikeResultNews(title, summary) {
+    return /수상|입상|최우수상|우수상|장려상|대상|성과|성료|마무리|개최\s*(?:결과|성과)|시상식|차지|선정/i.test(`${title} ${summary}`);
+}
 function classifyEvent(title, summary) {
     const titleOnly = title.toLowerCase();
     const text = `${title} ${summary}`.toLowerCase();
@@ -724,7 +731,7 @@ function classifyEvent(title, summary) {
         return "hackathon";
     if (/컨퍼런스|conference|세미나|포럼|secon|codegate/i.test(text))
         return "conference";
-    if (/취약점|랜섬웨어|침해사고|악성코드|제로데이|보안뉴스|security/i.test(text))
+    if (isSecurityNews(title, summary))
         return "news";
     return "security";
 }
@@ -735,11 +742,13 @@ function isEventAnnouncement(title, summary) {
 function shouldPublishAutoEvent(item) {
     const now = Date.now();
     if (item.kind === "news")
-        return item.publishedAt >= now - 30 * 86400000;
+        return item.publishedAt >= now - 30 * 86400000 && isSecurityNews(item.title, item.summary ?? "");
+    if (looksLikeResultNews(item.title, item.summary ?? ""))
+        return false;
     const target = item.endsAt ?? item.startsAt;
     if (!target)
         return false;
-    if (target < now - 86400000)
+    if (target < now - 3 * 86400000)
         return false;
     return isEventAnnouncement(item.title, item.summary ?? "");
 }
@@ -780,12 +789,14 @@ function bucketForEvent(item) {
     const now = Date.now();
     const lowerTitle = item.title.toLowerCase();
     const target = item.endsAt ?? item.startsAt;
+    if (item.kind === "news")
+        return "latest";
     if (target && target < now)
         return "ended";
     if (item.kind === "ctf" && /final|main round|본선|결승|데모데이/i.test(lowerTitle))
         return "final";
     if (!target)
-        return item.kind === "news" ? "within_1m" : "unknown";
+        return "unknown";
     const days = (target - now) / 86400000;
     if (days <= 31)
         return "within_1m";
@@ -932,10 +943,14 @@ async function fetchNaverSearchEvents() {
         return [];
     const maxResults = Math.min(100, Math.max(10, Number(process.env.SEARCH_API_MAX_RESULTS ?? 30) || 30));
     const queries = [
-        "정보보안 대회 OR 해킹방어대회 OR CTF",
-        "보안 해커톤 OR 정보보호 공모전 OR 사이버보안 경진대회",
-        "정보보안 컨퍼런스 OR 보안 세미나 OR KISA 보안",
-        "취약점 랜섬웨어 침해사고 정보보안",
+        { name: "검색API-CTF", query: "CTF 대회 모집 OR 해킹방어대회 접수 OR 사이버공격방어대회", kind: "ctf", requireDate: true },
+        { name: "검색API-CTF-해외", query: "CTF competition registration cybersecurity challenge", kind: "ctf", requireDate: true },
+        { name: "검색API-AI대회", query: "AI 경진대회 모집 OR 인공지능 공모전 OR 데이터 경진대회 접수", kind: "ai", requireDate: true },
+        { name: "검색API-AI보안", query: "AI 보안 해커톤 OR AI security hackathon OR 사이버보안 AI 경진대회", kind: "ai", requireDate: true },
+        { name: "검색API-해커톤", query: "정보보안 해커톤 모집 OR 사이버보안 해커톤 참가", kind: "hackathon", requireDate: true },
+        { name: "검색API-컨퍼런스", query: "정보보안 컨퍼런스 OR 사이버보안 세미나 OR 보안 포럼", kind: "conference", requireDate: true },
+        { name: "검색API-고등학생보안", query: "고등학생 정보보안 모집 OR 고등학교 사이버보안 캠프 OR 청소년 보안 경진대회 접수", kind: "security", requireDate: true },
+        { name: "검색API-보안뉴스", query: "정보보안 취약점 랜섬웨어 침해사고 보안패치", kind: "news", requireDate: false },
     ];
     const out = [];
     for (const query of queries) {
@@ -944,7 +959,7 @@ async function fetchNaverSearchEvents() {
             { endpoint: "news.json", source: "Naver News", dated: true },
         ]) {
             const url = new URL(`https://openapi.naver.com/v1/search/${api.endpoint}`);
-            url.searchParams.set("query", query);
+            url.searchParams.set("query", query.query);
             url.searchParams.set("display", String(Math.min(maxResults, 100)));
             url.searchParams.set("sort", api.dated ? "date" : "sim");
             const res = await fetch(url, {
@@ -965,21 +980,31 @@ async function fetchNaverSearchEvents() {
                     continue;
                 const pubDate = Date.parse(String(row.pubDate ?? ""));
                 const startsAt = extractDateMs(`${title} ${summary}`);
-                const kind = classifyEvent(title, summary);
-                if (!startsAt || startsAt < Date.now() - 86400000 || kind === "news")
-                    continue;
-                if (!isEventAnnouncement(title, summary))
-                    continue;
+                const kind = query.kind;
+                if (kind === "news") {
+                    if (!isSecurityNews(title, summary))
+                        continue;
+                    if (Number.isFinite(pubDate) && pubDate < Date.now() - 30 * 86400000)
+                        continue;
+                }
+                else {
+                    if (query.requireDate && !startsAt)
+                        continue;
+                    if (startsAt && startsAt < Date.now() - 3 * 86400000)
+                        continue;
+                    if (!isEventAnnouncement(title, summary) || looksLikeResultNews(title, summary))
+                        continue;
+                }
                 const item = {
-                    id: eventId(link, `naver:${api.source}:${title}`),
+                    id: eventId(link, `naver:${query.name}:${api.source}:${title}`),
                     guildId: "",
                     title,
                     link,
-                    source: api.source,
+                    source: query.name,
                     kind,
                     summary,
                     publishedAt: Number.isFinite(pubDate) ? pubDate : Date.now(),
-                    startsAt: startsAt ?? (kind === "news" && Number.isFinite(pubDate) ? pubDate : undefined),
+                    startsAt: kind === "news" ? (Number.isFinite(pubDate) ? pubDate : Date.now()) : startsAt,
                 };
                 item.bucket = bucketForEvent(item);
                 out.push(item);
@@ -1001,10 +1026,10 @@ async function ensureEventForum(guild, item) {
     }
     if (kind === "news") {
         const ch = await guild.channels.create({
-            name: kindLabel,
+            name: EVENT_BUCKET_LABELS.latest,
             type: discord_js_1.ChannelType.GuildForum,
             parent: categoryId,
-            topic: `${kindLabel} 공지와 소식`,
+            topic: `${kindLabel} 최신 소식`,
         });
         (0, store_1.setForumFor)(guild.id, key, ch.id);
         return ch;
@@ -1139,12 +1164,9 @@ async function syncEvents(guild) {
     catch (e) {
         errors.push(`Naver: ${e?.message ?? "실패"}`);
     }
-    const cutoff = Date.now() - 30 * 86400000;
     const unique = new Map();
     for (const item of items) {
-        if (item.kind === "news" && item.publishedAt < cutoff)
-            continue;
-        const startsAt = item.startsAt ?? (item.kind === "news" ? item.publishedAt : extractDateMs(`${item.title} ${item.summary ?? ""}`));
+        const startsAt = item.startsAt ?? extractDateMs(`${item.title} ${item.summary ?? ""}`);
         const next = { ...item, guildId: guild.id, startsAt };
         next.kind = next.kind ?? classifyEvent(next.title, next.summary ?? "");
         next.bucket = bucketForEvent(next);
