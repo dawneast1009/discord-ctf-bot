@@ -14,6 +14,27 @@ const GUILD_IDS = (process.env.GUILD_IDS ?? "")
     .map((s) => s.trim())
     .filter(Boolean);
 const genId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+/** "24h", "2d", "1d12h", "90m" → 밀리초. 인식 못하면 null */
+function parseDuration(input) {
+    const str = input.trim().toLowerCase();
+    if (!str)
+        return null;
+    let ms = 0;
+    let matched = false;
+    const re = /(\d+)\s*([dhm])/g;
+    let m;
+    while ((m = re.exec(str))) {
+        matched = true;
+        const n = Number(m[1]);
+        if (m[2] === "d")
+            ms += n * 86400000;
+        else if (m[2] === "h")
+            ms += n * 3600000;
+        else
+            ms += n * 60000;
+    }
+    return matched ? ms : null;
+}
 function parseTier(input) {
     const trimmed = input.trim();
     const m = trimmed.match(/^(.+?)\s*(\d+)\s*$/);
@@ -61,6 +82,11 @@ const commands = [
         .addChoices({ name: "푼 사람 (1솔브)", value: "1" }, { name: "도와준 사람 (0.5솔브)", value: "0.5" })))
         .addSubcommand((s) => s.setName("pull").setDescription("CTFd 사이트에 로그인해 문제 가져오기 (관리자)"))
         .addSubcommand((s) => s.setName("import").setDescription("문제 목록을 붙여넣어 한 번에 등록 (관리자)"))
+        .addSubcommand((s) => s
+        .setName("시간")
+        .setDescription("대회 기간 설정 (관리자)")
+        .addStringOption((o) => o.setName("ctf").setDescription("CTF 이름").setRequired(true))
+        .addStringOption((o) => o.setName("기간").setDescription("지금부터 진행 시간. 예: 24h, 2d, 1d12h").setRequired(true)))
         .toJSON(),
 ];
 client.once(discord_js_1.Events.ClientReady, async (c) => {
@@ -165,42 +191,67 @@ async function ensurePublicText(guild, key, name, topic) {
 }
 const ensureLobby = (guild) => ensurePublicText(guild, "_ctflobby", "🚩-ctf-로비", "CTF 참가 버튼을 누르면 그 대회 문제가 보입니다.");
 const ensureSolveChannel = (guild) => ensurePublicText(guild, "_solvelog", "🏅-solve-기록", "푼 문제 기록이 올라옵니다.");
-/** CTF 참가자 역할 + 비공개 포럼 확보. 처음 만들면 로비에 참가 버튼 게시 */
+/** CTF 참가자 역할 + 비공개 카테고리 확보. 처음 만들면 로비에 참가 버튼 게시 */
 async function getOrCreateCtf(guild, ctfName) {
     const ctfKey = (0, store_1.keyOf)(ctfName);
-    // 역할
+    // 역할 (이 역할이 있어야 CTF 카테고리/채널이 보임)
     let roleId = (0, store_1.getCtfRole)(guild.id, ctfKey);
     let role = roleId ? guild.roles.cache.get(roleId) ?? (await guild.roles.fetch(roleId).catch(() => null)) : null;
     if (!role) {
         role = await guild.roles.create({ name: `CTF: ${ctfName}`.slice(0, 90), mentionable: false });
         (0, store_1.setCtfRole)(guild.id, ctfKey, role.id);
     }
-    // 비공개 포럼 (참가자 역할만 보임)
+    // 비공개 카테고리 (참가자 역할만 보임) — 장르 채널들이 이 안에 들어감
     let created = false;
-    const forumId = (0, store_1.getForumFor)(guild.id, `ctf:${ctfKey}`);
-    let forum = forumId ? guild.channels.cache.get(forumId) ?? (await guild.channels.fetch(forumId).catch(() => null)) : null;
-    if (!forum || forum.type !== discord_js_1.ChannelType.GuildForum) {
-        forum = await guild.channels.create({
-            name: `🚩-${ctfName}`.slice(0, 95),
-            type: discord_js_1.ChannelType.GuildForum,
-            topic: `${ctfName} — 참가자만 볼 수 있는 문제 게시판`,
+    const catKey = `ctfcat:${ctfKey}`;
+    const catId = (0, store_1.getForumFor)(guild.id, catKey);
+    let category = catId ? guild.channels.cache.get(catId) ?? (await guild.channels.fetch(catId).catch(() => null)) : null;
+    if (!category || category.type !== discord_js_1.ChannelType.GuildCategory) {
+        category = await guild.channels.create({
+            name: `🚩 ${ctfName}`.slice(0, 95),
+            type: discord_js_1.ChannelType.GuildCategory,
             permissionOverwrites: [
                 { id: guild.roles.everyone.id, deny: [discord_js_1.PermissionFlagsBits.ViewChannel] },
                 { id: role.id, allow: [discord_js_1.PermissionFlagsBits.ViewChannel] },
             ],
         });
-        (0, store_1.setForumFor)(guild.id, `ctf:${ctfKey}`, forum.id);
+        (0, store_1.setForumFor)(guild.id, catKey, category.id);
         created = true;
     }
-    // 처음 만들면 로비에 참가 버튼 게시
     if (created) {
         const lobby = await ensureLobby(guild);
         const row = new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId(`ctfjoin:${ctfKey}`).setLabel("참가할래요").setEmoji("🙌").setStyle(discord_js_1.ButtonStyle.Success));
+        const time = (0, store_1.getCtfTime)(guild.id, ctfKey);
+        const when = time
+            ? `\n⏰ <t:${Math.floor(time.startsAt / 1000)}:f> ~ <t:${Math.floor(time.endsAt / 1000)}:f> (<t:${Math.floor(time.endsAt / 1000)}:R> 종료)`
+            : "";
         await lobby
-            .send({ content: `🚩 **${ctfName}** 대회가 열렸어요! 아래 버튼을 누르면 참가하고 문제가 보입니다.`, components: [row] })
+            .send({ content: `🚩 **${ctfName}** 대회가 열렸어요! 아래 버튼을 누르면 참가하고 문제가 보입니다.${when}`, components: [row] })
             .catch(() => { });
     }
-    return { forum: forum, roleId: role.id, ctfKey };
+    return { categoryId: category.id, roleId: role.id, ctfKey };
+}
+/** CTF 카테고리 안에 장르별 포럼 채널 확보 (참가자 역할만 보임) */
+async function ensureGenreForum(guild, ctfKey, categoryId, roleId, genre) {
+    const key = `ctf:${ctfKey}:${(0, store_1.keyOf)(genre)}`;
+    const existingId = (0, store_1.getForumFor)(guild.id, key);
+    if (existingId) {
+        const ch = guild.channels.cache.get(existingId) ?? (await guild.channels.fetch(existingId).catch(() => null));
+        if (ch && ch.type === discord_js_1.ChannelType.GuildForum)
+            return ch;
+    }
+    const ch = await guild.channels.create({
+        name: genre.slice(0, 95),
+        type: discord_js_1.ChannelType.GuildForum,
+        parent: categoryId,
+        topic: `${genre} 장르 문제`,
+        permissionOverwrites: [
+            { id: guild.roles.everyone.id, deny: [discord_js_1.PermissionFlagsBits.ViewChannel] },
+            { id: roleId, allow: [discord_js_1.PermissionFlagsBits.ViewChannel] },
+        ],
+    });
+    (0, store_1.setForumFor)(guild.id, key, ch.id);
+    return ch;
 }
 async function ensureTags(forum, names) {
     let tags = forum.availableTags;
@@ -248,12 +299,10 @@ function ctfButtonRow(id) {
     return new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.ButtonBuilder().setCustomId(`ctftry:${id}`).setLabel("이거 풀래요").setEmoji("🙋").setStyle(discord_js_1.ButtonStyle.Success));
 }
 async function createCtfPost(guild, forum, ctfName, ctfKey, name, genre, authorId) {
-    const tagIds = await ensureTags(forum, [genre]);
     const id = genId();
     const post = await forum.threads.create({
         name: name.slice(0, 95),
         message: { embeds: [ctfCard(name, ctfName, genre, authorId)], components: [ctfButtonRow(id)] },
-        appliedTags: tagIds,
         reason: `CTF 문제 추가: ${name}`,
     });
     const rec = {
@@ -400,6 +449,21 @@ async function handleCtfCommand(interaction) {
             ephemeral: true,
         });
     }
+    if (sub === "시간") {
+        if (!isAdmin(interaction))
+            return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
+        const ctfNameOpt = interaction.options.getString("ctf", true).trim();
+        const dur = parseDuration(interaction.options.getString("기간", true));
+        if (!dur)
+            return interaction.reply({ content: "기간을 인식하지 못했어요. 예: `24h`, `2d`, `1d12h`, `90m`", ephemeral: true });
+        const ctfKey = (0, store_1.keyOf)(ctfNameOpt);
+        const start = Date.now();
+        const end = start + dur;
+        (0, store_1.setCtfTime)(guildId, ctfKey, start, end);
+        return interaction.reply({
+            content: `⏰ **${ctfNameOpt}** 대회 기간: <t:${Math.floor(start / 1000)}:f> ~ <t:${Math.floor(end / 1000)}:f> (<t:${Math.floor(end / 1000)}:R> 종료)`,
+        });
+    }
     if (sub === "스코어보드") {
         const filter = interaction.options.getString("ctf") ?? undefined;
         return interaction.reply({ embeds: [buildCtfScoreboard(guildId, filter)] });
@@ -425,13 +489,13 @@ async function handleCtfCommand(interaction) {
     if (sub === "pull") {
         if (!isAdmin(interaction))
             return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
-        const modal = new discord_js_1.ModalBuilder().setCustomId("ctfpull").setTitle("CTFd 로그인 & 문제 가져오기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("url").setLabel("사이트 URL (예: https://ctf.example.com)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("username").setLabel("아이디").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("password").setLabel("비밀번호 (이 창은 나만 보입니다)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)));
+        const modal = new discord_js_1.ModalBuilder().setCustomId("ctfpull").setTitle("CTFd 로그인 & 문제 가져오기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("url").setLabel("사이트 URL (예: https://ctf.example.com)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("duration").setLabel("대회 기간 (선택, 예: 24h)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(false).setMaxLength(20)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("username").setLabel("아이디").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("password").setLabel("비밀번호 (이 창은 나만 보입니다)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true)));
         return interaction.showModal(modal);
     }
     if (sub === "import") {
         if (!isAdmin(interaction))
             return interaction.reply({ content: "⛔ 관리자만 사용할 수 있습니다.", ephemeral: true });
-        const modal = new discord_js_1.ModalBuilder().setCustomId("ctfimport").setTitle("문제 목록 붙여넣기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder()
+        const modal = new discord_js_1.ModalBuilder().setCustomId("ctfimport").setTitle("문제 목록 붙여넣기").addComponents(new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("ctfname").setLabel("이 CTF 이름").setStyle(discord_js_1.TextInputStyle.Short).setRequired(true).setMaxLength(80)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder().setCustomId("duration").setLabel("대회 기간 (선택, 예: 24h, 2d)").setStyle(discord_js_1.TextInputStyle.Short).setRequired(false).setMaxLength(20)), new discord_js_1.ActionRowBuilder().addComponents(new discord_js_1.TextInputBuilder()
             .setCustomId("list")
             .setLabel("문제 목록 (사이트에서 복사해 붙여넣기)")
             .setStyle(discord_js_1.TextInputStyle.Paragraph)
@@ -688,19 +752,31 @@ async function handleSelect(interaction) {
             return interaction.update({ content: "이미 삭제된 CTF입니다.", components: [] });
         const ctfName = probs[0].ctfName;
         await interaction.update({ content: `🧨 **${ctfName}** 삭제 중...`, components: [] });
-        const forumId = (0, store_1.getForumFor)(guildId, `ctf:${key}`);
-        if (forumId) {
-            await deleteChannelSafe(forumId);
-            (0, store_1.removeForumFor)(guildId, `ctf:${key}`);
+        // 장르 포럼 채널들 삭제
+        const genreKeys = new Set(probs.map((p) => p.genreKey));
+        for (const gk of genreKeys) {
+            const fid = (0, store_1.getForumFor)(guildId, `ctf:${key}:${gk}`);
+            if (fid) {
+                await deleteChannelSafe(fid);
+                (0, store_1.removeForumFor)(guildId, `ctf:${key}:${gk}`);
+            }
         }
+        // 카테고리 삭제
+        const catId = (0, store_1.getForumFor)(guildId, `ctfcat:${key}`);
+        if (catId) {
+            await deleteChannelSafe(catId);
+            (0, store_1.removeForumFor)(guildId, `ctfcat:${key}`);
+        }
+        // 역할 삭제
         const roleId = (0, store_1.getCtfRole)(guildId, key);
         if (roleId) {
             await interaction.guild?.roles.delete(roleId).catch(() => { });
             (0, store_1.removeCtfRole)(guildId, key);
         }
+        (0, store_1.removeCtfTime)(guildId, key);
         for (const p of probs)
             (0, store_1.removeCtfProblem)(p.id);
-        return interaction.editReply({ content: `🧨 **${ctfName}** 대회(${probs.length}문제)와 역할을 통째로 삭제했습니다.` });
+        return interaction.editReply({ content: `🧨 **${ctfName}** 대회(${probs.length}문제)·채널·역할을 통째로 삭제했습니다.` });
     }
     if (cid.startsWith("ctfadd:")) {
         if (!isAdmin(interaction))
@@ -769,10 +845,14 @@ function buildCtfScoreboard(guildId, ctfFilter) {
                 pts.set(uid, (pts.get(uid) ?? 0) + v);
         const ranking = [...pts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
         const medals = ["🥇", "🥈", "🥉"];
-        const body = ranking.length
+        const rankBody = ranking.length
             ? ranking.map(([uid, n], i) => `${medals[i] ?? `#${i + 1}`} <@${uid}> — ${n}솔브`).join("\n")
             : "_아직 푼 사람이 없습니다._";
-        embed.addFields({ name: `📌 ${ctfName} (총 ${probs.length}문제)`, value: body.slice(0, 1024) });
+        const time = (0, store_1.getCtfTime)(guildId, probs[0].ctfKey);
+        const timeLine = time
+            ? `⏰ <t:${Math.floor(time.endsAt / 1000)}:R> ${time.endsAt > Date.now() ? "종료" : "종료됨"}\n`
+            : "";
+        embed.addFields({ name: `📌 ${ctfName} (총 ${probs.length}문제)`, value: (timeLine + rankBody).slice(0, 1024) });
     }
     return embed;
 }
@@ -852,7 +932,8 @@ async function finalizeCtf(interaction) {
         return interaction.reply({ content: `이미 **${ctfName}** 에 같은 이름의 문제가 있습니다.`, ephemeral: true });
     }
     await interaction.update({ content: "⏳ CTF 문제를 추가하는 중...", embeds: [], components: [] });
-    const { forum } = await getOrCreateCtf(guild, ctfName);
+    const { categoryId, roleId } = await getOrCreateCtf(guild, ctfName);
+    const forum = await ensureGenreForum(guild, ctfKey, categoryId, roleId, genre);
     const rec = await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id);
     ctfDrafts.delete(interaction.user.id);
     await interaction.editReply({
@@ -897,13 +978,22 @@ async function handleCtfImportModal(interaction) {
     }
     await interaction.deferReply({ ephemeral: true });
     const guild = interaction.guild;
-    const { forum, ctfKey } = await getOrCreateCtf(guild, ctfName);
+    const dur = parseDuration(interaction.fields.getTextInputValue("duration") ?? "");
+    if (dur)
+        (0, store_1.setCtfTime)(guild.id, (0, store_1.keyOf)(ctfName), Date.now(), Date.now() + dur);
+    const { categoryId, roleId, ctfKey } = await getOrCreateCtf(guild, ctfName);
+    const forumCache = new Map();
     let created = 0;
     let skipped = 0;
     for (const { name, genre } of items.slice(0, 50)) {
         if ((0, store_1.findCtfProblem)(guild.id, ctfKey, (0, store_1.keyOf)(name))) {
             skipped++;
             continue;
+        }
+        let forum = forumCache.get((0, store_1.keyOf)(genre));
+        if (!forum) {
+            forum = await ensureGenreForum(guild, ctfKey, categoryId, roleId, genre);
+            forumCache.set((0, store_1.keyOf)(genre), forum);
         }
         await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id).catch(() => { });
         created++;
@@ -971,7 +1061,11 @@ async function handleCtfPullModal(interaction) {
     if (list.length === 0)
         return interaction.editReply("⚠️ 로그인은 됐지만 공개된 문제가 없습니다.");
     const guild = interaction.guild;
-    const { forum, ctfKey } = await getOrCreateCtf(guild, ctfName);
+    const dur = parseDuration(interaction.fields.getTextInputValue("duration") ?? "");
+    if (dur)
+        (0, store_1.setCtfTime)(guild.id, (0, store_1.keyOf)(ctfName), Date.now(), Date.now() + dur);
+    const { categoryId, roleId, ctfKey } = await getOrCreateCtf(guild, ctfName);
+    const forumCache = new Map();
     let created = 0;
     let skipped = 0;
     for (const c of list.slice(0, 50)) {
@@ -982,6 +1076,11 @@ async function handleCtfPullModal(interaction) {
         if ((0, store_1.findCtfProblem)(guild.id, ctfKey, (0, store_1.keyOf)(name))) {
             skipped++;
             continue;
+        }
+        let forum = forumCache.get((0, store_1.keyOf)(genre));
+        if (!forum) {
+            forum = await ensureGenreForum(guild, ctfKey, categoryId, roleId, genre);
+            forumCache.set((0, store_1.keyOf)(genre), forum);
         }
         await createCtfPost(guild, forum, ctfName, ctfKey, name, genre, interaction.user.id).catch(() => { });
         created++;

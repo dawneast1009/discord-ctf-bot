@@ -23,6 +23,9 @@ exports.setVault = setVault;
 exports.getCtfRole = getCtfRole;
 exports.setCtfRole = setCtfRole;
 exports.removeCtfRole = removeCtfRole;
+exports.getCtfTime = getCtfTime;
+exports.setCtfTime = setCtfTime;
+exports.removeCtfTime = removeCtfTime;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
@@ -30,7 +33,7 @@ const DB_PATH = (0, node_path_1.join)(process.cwd(), "data.json");
 function keyOf(s) {
     return s.trim().toLowerCase();
 }
-const empty = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {} };
+const empty = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {}, ctfTimes: {} };
 function load() {
     if (!(0, node_fs_1.existsSync)(DB_PATH))
         return structuredClone(empty);
@@ -153,5 +156,17 @@ function setCtfRole(guildId, ctfKey, roleId) {
 }
 function removeCtfRole(guildId, ctfKey) {
     delete db.ctfRoles[`${guildId}:${ctfKey}`];
+    save();
+}
+// ── CTF 대회 시간 ─────────────────────────────────────────────────────
+function getCtfTime(guildId, ctfKey) {
+    return db.ctfTimes[`${guildId}:${ctfKey}`];
+}
+function setCtfTime(guildId, ctfKey, startsAt, endsAt) {
+    db.ctfTimes[`${guildId}:${ctfKey}`] = { startsAt, endsAt };
+    save();
+}
+function removeCtfTime(guildId, ctfKey) {
+    delete db.ctfTimes[`${guildId}:${ctfKey}`];
     save();
 }

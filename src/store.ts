@@ -63,9 +63,11 @@ interface DB {
   vaults: Record<string, string>;
   /** `${guildId}:${ctfKey}` -> 참가자 역할 ID */
   ctfRoles: Record<string, string>;
+  /** `${guildId}:${ctfKey}` -> 대회 시작/종료 시각(ms) */
+  ctfTimes: Record<string, { startsAt: number; endsAt: number }>;
 }
 
-const empty: DB = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {} };
+const empty: DB = { problems: {}, ctfProblems: {}, forums: {}, vaults: {}, ctfRoles: {}, ctfTimes: {} };
 
 function load(): DB {
   if (!existsSync(DB_PATH)) return structuredClone(empty);
@@ -192,5 +194,18 @@ export function setCtfRole(guildId: string, ctfKey: string, roleId: string) {
 }
 export function removeCtfRole(guildId: string, ctfKey: string) {
   delete db.ctfRoles[`${guildId}:${ctfKey}`];
+  save();
+}
+
+// ── CTF 대회 시간 ─────────────────────────────────────────────────────
+export function getCtfTime(guildId: string, ctfKey: string): { startsAt: number; endsAt: number } | undefined {
+  return db.ctfTimes[`${guildId}:${ctfKey}`];
+}
+export function setCtfTime(guildId: string, ctfKey: string, startsAt: number, endsAt: number) {
+  db.ctfTimes[`${guildId}:${ctfKey}`] = { startsAt, endsAt };
+  save();
+}
+export function removeCtfTime(guildId: string, ctfKey: string) {
+  delete db.ctfTimes[`${guildId}:${ctfKey}`];
   save();
 }
